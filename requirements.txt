@@ -7,4 +7,4 @@
    httpx<0.28.0
    qrcode[pil]
    gTTS
-   psycopg2-binary        # <-- ADD THIS LINE
+   psycopg[binary]
