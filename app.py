@@ -1,0 +1,964 @@
+"""SmartHealth: offline-first clinical support for Nigerian communities.
+
+Flow of a patient encounter:
+    translation -> triage -> diagnosis -> referral
+"""
+import base64
+import hmac
+import io
+import json
+import logging
+import os
+import random
+import re
+import secrets
+import string
+import time
+import traceback
+from datetime import datetime, timezone
+from functools import wraps
+
+import qrcode
+from dotenv import load_dotenv
+from flask import (Flask, jsonify, redirect, render_template, request,
+                   send_from_directory, session, url_for)
+from flask_sqlalchemy import SQLAlchemy
+from groq import Groq
+from gtts import gTTS
+from openai import OpenAI
+from sqlalchemy import func
+from werkzeug.security import check_password_hash, generate_password_hash
+
+# ==========================================
+# 1. APP CONFIGURATION
+# ==========================================
+load_dotenv()
+DEBUG = os.getenv("FLASK_DEBUG") == "1"
+
+logging.basicConfig(
+    level=logging.DEBUG if DEBUG else logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger("smarthealth")
+
+app = Flask(__name__)
+
+_secret = os.getenv("SECRET_KEY")
+if not _secret:
+    # Never ship a hard-coded key. A random key keeps the app safe, but sessions
+    # reset on restart, so set SECRET_KEY in your host's environment variables.
+    _secret = secrets.token_hex(32)
+    logger.warning("SECRET_KEY is not set. Using a random key; sessions will not survive restarts.")
+
+app.config.update(
+    SECRET_KEY=_secret,
+    SQLALCHEMY_DATABASE_URI=os.getenv("DATABASE_URL", "sqlite:////tmp/smarthealth.db"),
+    SQLALCHEMY_TRACK_MODIFICATIONS=False,
+    MAX_CONTENT_LENGTH=15 * 1024 * 1024,  # 15 MB audio uploads
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=not DEBUG,
+    PERMANENT_SESSION_LIFETIME=60 * 60 * 12,
+)
+db = SQLAlchemy(app)
+
+LLM_MODEL = os.getenv("LLM_MODEL", "gemini/gemini-1.5-flash")
+STAGES = ["translation", "triage", "diagnosis", "referral"]
+
+
+def utcnow():
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+# ==========================================
+# 2. DATABASE MODELS
+# ==========================================
+class MedicalCenter(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=False)
+    location = db.Column(db.String(100), nullable=True)
+    short_code = db.Column(db.String(10), unique=True, nullable=False)
+
+
+class Worker(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(50), unique=True, nullable=False)
+    password_hash = db.Column(db.String(200), nullable=False)
+    full_name = db.Column(db.String(100), nullable=False)
+    worker_code = db.Column(db.String(20), unique=True, nullable=False)
+    role = db.Column(db.String(20), nullable=False, default="CHW")
+    facility_id = db.Column(db.Integer, db.ForeignKey("medical_center.id"), nullable=False)
+    facility = db.relationship("MedicalCenter", backref="workers")
+
+    def set_password(self, password):
+        self.password_hash = generate_password_hash(password)
+
+    def check_password(self, password):
+        return check_password_hash(self.password_hash, password)
+
+
+class Encounter(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    patient_name = db.Column(db.String(100), nullable=False)
+    dialect = db.Column(db.String(50), nullable=True)
+    statement = db.Column(db.Text, nullable=True)
+    translation = db.Column(db.Text, nullable=True)
+    vitals_json = db.Column(db.Text, nullable=True)
+    tc_steps_translation = db.Column(db.Text, nullable=True)  # JSON: {"conclusion": "..."}
+    triage_tier = db.Column(db.String(10), nullable=True)
+    triage_notes = db.Column(db.Text, nullable=True)
+    tc_steps_triage = db.Column(db.Text, nullable=True)
+    diagnosis_notes = db.Column(db.Text, nullable=True)
+    diagnosis_medications = db.Column(db.Text, nullable=True)
+    tc_steps_diagnosis = db.Column(db.Text, nullable=True)  # JSON: AI options awaiting selection
+    referral_reason = db.Column(db.Text, nullable=True)
+    referral_facility = db.Column(db.String(100), nullable=True)
+    referral_code = db.Column(db.String(20), nullable=True, unique=True)
+    referral_qr = db.Column(db.Text, nullable=True)
+    origin_worker_id = db.Column(db.Integer, db.ForeignKey("worker.id"), nullable=True)
+    origin_facility_id = db.Column(db.Integer, db.ForeignKey("medical_center.id"), nullable=True)
+    destination_facility_id = db.Column(db.Integer, db.ForeignKey("medical_center.id"), nullable=True)
+    referral_status = db.Column(db.String(20), default="pending")
+    current_stage = db.Column(db.String(20), default="translation")
+    status = db.Column(db.String(20), default="active")
+    created_at = db.Column(db.DateTime, default=utcnow)
+    updated_at = db.Column(db.DateTime, default=utcnow, onupdate=utcnow)
+
+
+class Patient(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    phone_number = db.Column(db.String(20), unique=True, nullable=False, index=True)
+    display_name = db.Column(db.String(50), nullable=True)
+    preferred_language = db.Column(db.String(10), default="ha")
+    created_at = db.Column(db.DateTime, default=utcnow)
+
+
+class Keyword(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    word = db.Column(db.String(50), unique=True, nullable=False, index=True)
+
+
+class ChatMessage(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    patient_id = db.Column(db.Integer, db.ForeignKey("patient.id"), nullable=False, index=True)
+    role = db.Column(db.String(10), nullable=False)
+    original_text = db.Column(db.Text, nullable=False)
+    translated_text = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=utcnow)
+
+
+memory_keywords = db.Table(
+    "memory_keywords",
+    db.Column("memory_id", db.Integer, db.ForeignKey("memory_index.id"), primary_key=True),
+    db.Column("keyword_id", db.Integer, db.ForeignKey("keyword.id"), primary_key=True),
+)
+
+
+class MemoryIndex(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    patient_id = db.Column(db.Integer, db.ForeignKey("patient.id"), nullable=False, index=True)
+    context_chunk = db.Column(db.Text, nullable=False)
+    created_at = db.Column(db.DateTime, default=utcnow)
+    keywords = db.relationship("Keyword", secondary=memory_keywords, backref="memories")
+
+
+# ==========================================
+# 3. DATABASE INITIALIZATION & SEEDING
+# ==========================================
+def seed_demo_data():
+    """Demo facilities and workers. Set SEED_PASSWORD to avoid the default."""
+    if MedicalCenter.query.count():
+        return
+    password = os.getenv("SEED_PASSWORD", "password123")
+    if password == "password123":
+        logger.warning("Seeding demo workers with the default password. Set SEED_PASSWORD outside local dev.")
+    mu = MedicalCenter(name="Murtala Muhammed Specialist Hospital", location="Kano", short_code="MU")
+    ak = MedicalCenter(name="Aminu Kano Teaching Hospital", location="Kano", short_code="AK")
+    db.session.add_all([mu, ak])
+    db.session.commit()
+
+    w1 = Worker(username="chw_amina", full_name="Amina Bello", worker_code="MU2789", role="CHW", facility_id=mu.id)
+    w2 = Worker(username="dr_yusuf", full_name="Dr. Yusuf Ali", worker_code="AK1001", role="Doctor", facility_id=ak.id)
+    for w in (w1, w2):
+        w.set_password(password)
+    db.session.add_all([w1, w2])
+    db.session.commit()
+    logger.info("Seeded facilities and workers.")
+
+
+with app.app_context():
+    db.create_all()
+    seed_demo_data()
+
+
+# ==========================================
+# 4. HELPERS
+# ==========================================
+_groq = None
+_llm = None
+
+
+def get_groq():
+    global _groq
+    if _groq is None:
+        _groq = Groq(api_key=os.getenv("GROQ_API_KEY"))
+    return _groq
+
+
+def get_llm():
+    global _llm
+    if _llm is None:
+        _llm = OpenAI(api_key=os.getenv("LITELLM_API_KEY"), base_url=os.getenv("LITELLM_BASE_URL"))
+    return _llm
+
+
+def llm_text(messages, temperature=0.2):
+    resp = get_llm().chat.completions.create(model=LLM_MODEL, messages=messages, temperature=temperature)
+    return resp.choices[0].message.content.strip()
+
+
+def parse_json_reply(raw):
+    """Parse a model reply that should be JSON, tolerating code fences and stray prose."""
+    raw = re.sub(r"^```(?:json)?|```$", "", raw.strip(), flags=re.MULTILINE).strip()
+    start, end = raw.find("{"), raw.rfind("}")
+    if start == -1 or end == -1:
+        raise json.JSONDecodeError("No JSON object found", raw, 0)
+    return json.loads(raw[start:end + 1])
+
+
+def llm_json(prompt, temperature=0.2):
+    return parse_json_reply(llm_text([{"role": "user", "content": prompt}], temperature))
+
+
+def transcribe(audio_file):
+    """Whisper transcription. Keeps the uploaded filename so Safari's mp4 audio works."""
+    data = audio_file.read()
+    if len(data) < 2000:
+        raise ValueError("Audio too short. Please record at least 2 seconds.")
+    mime = audio_file.mimetype or "audio/webm"
+    result = get_groq().audio.transcriptions.create(
+        file=(audio_file.filename or "audio.webm", data, mime),
+        model="whisper-large-v3",
+        response_format="text",
+    )
+    text = result.strip() if isinstance(result, str) else result.text.strip()
+    if not text:
+        raise ValueError("No speech detected. Please try again.")
+    return text
+
+
+def speak(text, lang="en"):
+    """Text to speech as a data URI, or None if it fails."""
+    try:
+        buf = io.BytesIO()
+        gTTS(text=text, lang=lang, slow=False).write_to_fp(buf)
+        return "data:audio/mp3;base64," + base64.b64encode(buf.getvalue()).decode("utf-8")
+    except Exception:
+        logger.exception("gTTS failed")
+        return None
+
+
+def make_qr_data_uri(text):
+    buf = io.BytesIO()
+    qrcode.make(text).save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("utf-8")
+
+
+def generate_referral_code(dest_short_code):
+    while True:
+        rand = "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
+        code = f"{dest_short_code}-{rand}"
+        if not Encounter.query.filter_by(referral_code=code).first():
+            return code
+
+
+def get_or_create_keyword(word):
+    word = word.lower().strip()[:50]
+    kw = Keyword.query.filter_by(word=word).first()
+    if not kw:
+        kw = Keyword(word=word)
+        db.session.add(kw)
+        db.session.flush()
+    return kw
+
+
+STOP_WORDS = {
+    "the", "and", "for", "are", "but", "not", "you", "all", "can", "had", "her", "was", "one", "our", "out",
+    "day", "get", "has", "him", "his", "how", "its", "may", "new", "now", "old", "see", "two", "who", "boy",
+    "did", "she", "use", "way", "many", "would", "there", "their", "na", "wetin", "dey", "abi", "sha", "ko",
+    "ni", "ta", "da", "wu",
+}
+
+
+def extract_search_keywords(text):
+    text = re.sub(r"[^\w\s]", "", text.lower())
+    return list({w for w in text.split() if w.isdigit() or (len(w) > 3 and w not in STOP_WORDS)})
+
+
+def clean_phone(raw):
+    phone = re.sub(r"[^\d+]", "", raw or "")
+    return phone if 10 <= len(phone.lstrip("+")) <= 15 else None
+
+
+def to_float(value):
+    try:
+        return None if value in (None, "") else float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def advance_stage(enc, stage):
+    """Only ever move an encounter forward through the workflow."""
+    if STAGES.index(stage) > STAGES.index(enc.current_stage or "translation"):
+        enc.current_stage = stage
+
+
+def merge_vitals(enc, new):
+    current = json.loads(enc.vitals_json) if enc.vitals_json else {}
+    current.update({k: v for k, v in new.items() if v is not None})
+    enc.vitals_json = json.dumps(current)
+    return current
+
+
+def get_owned_encounter(encounter_id):
+    """Encounters a worker may edit: the ones they created."""
+    try:
+        enc = db.session.get(Encounter, int(encounter_id)) if encounter_id else None
+    except (TypeError, ValueError):
+        return None
+    if enc and enc.origin_worker_id in (None, session.get("worker_id")):
+        return enc
+    return None
+
+
+def fail(message, status=500, exc=None):
+    if exc is not None:
+        logger.error("%s\n%s", message, traceback.format_exc())
+    return jsonify({"error": message}), status
+
+
+# ---- Auth, CSRF, login throttling ----
+def login_required(f):
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        if "worker_id" not in session:
+            if request.path.startswith("/api/"):
+                return jsonify({"error": "Your session expired. Please log in again."}), 401
+            return redirect(url_for("login"))
+        return f(*args, **kwargs)
+    return wrapper
+
+
+@app.before_request
+def csrf_protect():
+    if "csrf" not in session:
+        session["csrf"] = secrets.token_urlsafe(32)
+    if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+        token = request.headers.get("X-CSRF-Token") or request.form.get("csrf_token") or ""
+        if not hmac.compare_digest(token, session["csrf"]):
+            if request.path.startswith("/api/"):
+                return jsonify({"error": "Security check failed. Reload the page and try again."}), 400
+            return redirect(url_for("login"))
+
+
+@app.context_processor
+def inject_globals():
+    worker = None
+    if "worker_id" in session:
+        worker = {"name": session.get("worker_name"), "facility": session.get("facility_name")}
+    return {"csrf_token": session.get("csrf", ""), "current_worker": worker}
+
+
+@app.template_filter("fromjson")
+def fromjson(value):
+    try:
+        return json.loads(value) if value else {}
+    except (TypeError, ValueError):
+        return {}
+
+
+@app.after_request
+def security_headers(resp):
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("Referrer-Policy", "same-origin")
+    resp.headers.setdefault("Permissions-Policy", "microphone=(self)")
+    return resp
+
+
+_attempts = {}
+
+
+def login_throttled(ip):
+    now = time.time()
+    recent = [t for t in _attempts.get(ip, []) if now - t < 600]
+    _attempts[ip] = recent
+    return len(recent) >= 8
+
+
+# ==========================================
+# 5. TRIAGE RULES (deterministic, works without AI)
+# ==========================================
+VITAL_LIMITS = {"temp": (25, 45), "hr": (20, 300), "sys_bp": (40, 300), "dia_bp": (20, 200), "spo2": (30, 100)}
+
+
+def compute_triage(v):
+    """Rule-based tiers: RED needs immediate care, YELLOW needs prompt assessment."""
+    red, yellow = [], []
+    temp, hr, sys_bp, dia_bp, spo2 = (v.get(k) for k in ("temp", "hr", "sys_bp", "dia_bp", "spo2"))
+
+    if spo2 is not None:
+        if spo2 < 90: red.append(f"SpO2 {spo2:g}% (below 90)")
+        elif spo2 < 95: yellow.append(f"SpO2 {spo2:g}% (below 95)")
+    if sys_bp is not None:
+        if sys_bp < 90 or sys_bp >= 180: red.append(f"Systolic BP {sys_bp:g} mmHg")
+        elif sys_bp < 100 or sys_bp >= 140: yellow.append(f"Systolic BP {sys_bp:g} mmHg")
+    if dia_bp is not None:
+        if dia_bp >= 120: red.append(f"Diastolic BP {dia_bp:g} mmHg")
+        elif dia_bp >= 90: yellow.append(f"Diastolic BP {dia_bp:g} mmHg")
+    if hr is not None:
+        if hr < 40 or hr >= 130: red.append(f"Heart rate {hr:g} bpm")
+        elif hr < 50 or hr >= 100: yellow.append(f"Heart rate {hr:g} bpm")
+    if temp is not None:
+        if temp >= 40 or temp < 35: red.append(f"Temperature {temp:g} °C")
+        elif temp >= 38 or temp < 36: yellow.append(f"Temperature {temp:g} °C")
+
+    if red:
+        return "RED", red, "Immediate attention needed. Stabilise the patient and refer to the nearest facility without delay."
+    if yellow:
+        return "YELLOW", yellow, "Needs prompt assessment. Recheck vitals in 15 to 30 minutes and prepare for a possible referral."
+    return "GREEN", ["All vitals within expected range"], "No urgent vital-sign concerns. Give routine care and explain the danger signs to the patient."
+
+
+# ==========================================
+# 6. PAGE ROUTES
+# ==========================================
+@app.route("/")
+def home():
+    return render_template("start.html")
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        ip = request.headers.get("X-Forwarded-For", request.remote_addr or "").split(",")[0].strip()
+        if login_throttled(ip):
+            return render_template("login.html", error="Too many attempts. Wait 10 minutes and try again."), 429
+        username = (request.form.get("username") or "").strip()
+        password = request.form.get("password") or ""
+        worker = Worker.query.filter((Worker.username == username) | (Worker.worker_code == username.upper())).first()
+        if worker and worker.check_password(password):
+            session.clear()
+            session.permanent = True
+            session.update(
+                worker_id=worker.id, facility_id=worker.facility_id, worker_code=worker.worker_code,
+                worker_name=worker.full_name, facility_name=worker.facility.name, csrf=secrets.token_urlsafe(32),
+            )
+            _attempts.pop(ip, None)
+            return redirect(url_for("dashboard"))
+        _attempts.setdefault(ip, []).append(time.time())
+        return render_template("login.html", error="Invalid worker code or password."), 401
+    return render_template("login.html")
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+
+@app.route("/translator")
+@login_required
+def translator():
+    return render_template("translator.html")
+
+
+@app.route("/triage")
+@login_required
+def triage():
+    return render_template("triage.html")
+
+
+@app.route("/diagnosis")
+@login_required
+def diagnosis():
+    return render_template("diagnosis.html")
+
+
+@app.route("/referral")
+@login_required
+def referral():
+    return render_template("referral.html")
+
+
+@app.route("/lookup")
+@login_required
+def lookup_page():
+    return render_template("lookup.html")
+
+
+@app.route("/patient")
+def patient_portal():
+    return render_template("patient.html")
+
+
+@app.route("/offline")
+def offline():
+    return render_template("offline.html")
+
+
+@app.route("/healthz")
+def healthz():
+    return jsonify({"status": "ok"})
+
+
+@app.route("/sw.js")
+def service_worker():
+    # Served from the site root so the worker can control every page (a worker under /static/ cannot).
+    resp = send_from_directory(app.static_folder, "sw.js", mimetype="application/javascript")
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
+@app.route("/dashboard")
+@login_required
+def dashboard():
+    worker_id, facility_id = session["worker_id"], session["facility_id"]
+    scope = db.or_(Encounter.origin_worker_id == worker_id, Encounter.destination_facility_id == facility_id)
+
+    tier = request.args.get("tier", "all").upper()
+    stage = request.args.get("stage", "all").lower()
+    search = (request.args.get("search") or "").strip()[:60]
+    page = request.args.get("page", 1, type=int)
+
+    query = Encounter.query.filter(scope)
+    if tier in ("RED", "YELLOW", "GREEN"):
+        query = query.filter(Encounter.triage_tier == tier)
+    else:
+        tier = "all"
+    if stage in ("triage", "diagnosis", "referred"):
+        query = query.filter(Encounter.current_stage == ("referral" if stage == "referred" else stage))
+    else:
+        stage = "all"
+    if search:
+        query = query.filter(Encounter.patient_name.ilike(f"%{search}%"))
+
+    pagination = query.order_by(Encounter.created_at.desc()).paginate(page=page, per_page=20, error_out=False)
+
+    counts = dict(db.session.query(Encounter.triage_tier, func.count()).filter(scope).group_by(Encounter.triage_tier).all())
+    incoming = Encounter.query.filter_by(destination_facility_id=facility_id, referral_status="pending").count()
+
+    return render_template(
+        "dashboard.html",
+        pagination=pagination,
+        encounters=pagination.items,
+        current_worker_id=worker_id,
+        facility_centers={c.id: c.name for c in MedicalCenter.query.all()},
+        current_tier=tier, current_stage=stage, current_search=search,
+        stats={"red": counts.get("RED", 0), "yellow": counts.get("YELLOW", 0),
+               "green": counts.get("GREEN", 0), "incoming": incoming},
+    )
+
+
+# ==========================================
+# 7. API ROUTES
+# ==========================================
+@app.route("/api/centers")
+@login_required
+def get_centers():
+    return jsonify([
+        {"id": c.id, "name": c.name, "location": c.location, "short_code": c.short_code}
+        for c in MedicalCenter.query.order_by(MedicalCenter.name).all()
+    ])
+
+
+@app.route("/api/encounter/<int:encounter_id>")
+@login_required
+def get_encounter(encounter_id):
+    """Lets triage, diagnosis and referral pages pick up where the previous stage stopped."""
+    enc = get_owned_encounter(encounter_id)
+    if not enc:
+        return fail("Encounter not found.", 404)
+    return jsonify({
+        "id": enc.id,
+        "patient_name": enc.patient_name,
+        "vitals": json.loads(enc.vitals_json) if enc.vitals_json else {},
+        "translation": enc.translation,
+        "conclusion": fromjson(enc.tc_steps_translation).get("conclusion"),
+        "triage_tier": enc.triage_tier,
+        "diagnosis": enc.diagnosis_notes,
+        "current_stage": enc.current_stage,
+    })
+
+
+@app.route("/api/translate", methods=["POST"])
+@login_required
+def translate_audio():
+    audio_file = request.files.get("audio")
+    if not audio_file:
+        return fail("No audio file provided.", 400)
+    try:
+        raw_text = transcribe(audio_file)
+    except ValueError as e:
+        return fail(str(e), 400)
+    except Exception as e:
+        return fail("Could not transcribe the audio. Check your connection and try again.", 502, e)
+
+    prompt = f"""
+    You are a medical data extraction assistant. Analyze this patient statement recorded by a health worker in Nigeria.
+    The statement may be in Hausa, Nigerian Pidgin, or English.
+    STATEMENT: "{raw_text}"
+    Return ONLY valid JSON (no markdown, no extra text):
+    {{
+      "patient_name": "Patient's name if mentioned, otherwise 'Unnamed Patient'",
+      "dialect": "Detected language: Hausa, Pidgin, or English",
+      "statement": "The original statement exactly as transcribed",
+      "translation": "The statement translated into clear English",
+      "vitals": {{
+        "temp": "temperature in Celsius or 'N/A'",
+        "bp_sys": "systolic BP or 'N/A'",
+        "bp_dia": "diastolic BP or 'N/A'",
+        "spo2": "oxygen saturation % or 'N/A'"
+      }},
+      "conclusion": "One-sentence clinical summary of the main complaint"
+    }}
+    """
+    try:
+        data = llm_json(prompt, 0.2)
+    except json.JSONDecodeError:
+        return fail("The AI returned unreadable data. Please try again.", 502, True)
+    except Exception as e:
+        return fail("The AI service is unavailable. Please try again.", 502, e)
+
+    vitals = data.get("vitals") or {}
+    # Stored vitals use the same keys as the triage form.
+    stored = {"temp": to_float(vitals.get("temp")), "sys_bp": to_float(vitals.get("bp_sys")),
+              "dia_bp": to_float(vitals.get("bp_dia")), "spo2": to_float(vitals.get("spo2"))}
+    enc = Encounter(
+        patient_name=str(data.get("patient_name") or "Unnamed Patient")[:100],
+        dialect=data.get("dialect"), statement=data.get("statement"), translation=data.get("translation"),
+        vitals_json=json.dumps({k: v for k, v in stored.items() if v is not None}),
+        tc_steps_translation=json.dumps({"conclusion": data.get("conclusion")}),
+        current_stage="translation", status="active",
+        origin_worker_id=session["worker_id"], origin_facility_id=session["facility_id"],
+    )
+    db.session.add(enc)
+    db.session.commit()
+    data["encounter_id"] = enc.id
+    data["vitals"] = vitals
+    return jsonify(data)
+
+
+@app.route("/api/tts_instruction", methods=["POST"])
+@login_required
+def tts_instruction():
+    data = request.get_json(silent=True) or {}
+    text = (data.get("text") or "").strip()[:500]
+    language = data.get("language", "en")
+    if not text:
+        return fail("No text provided.", 400)
+
+    target_text = text
+    if language != "en":
+        lang_name = {"ha": "Hausa", "pcm": "Nigerian Pidgin"}.get(language, "Hausa")
+        try:
+            target_text = llm_text([
+                {"role": "system", "content": f"Translate the following medical instruction to {lang_name}. Return ONLY the translated text, no quotes."},
+                {"role": "user", "content": text},
+            ], 0.3)
+        except Exception:
+            logger.exception("Instruction translation failed; using original text")
+
+    audio = speak(target_text, "ha" if language == "ha" else "en")
+    if not audio:
+        return fail("Could not generate audio. Try again.", 502)
+    return jsonify({"audio_url": audio, "translated_text": target_text})
+
+
+@app.route("/api/triage", methods=["POST"])
+@login_required
+def api_triage():
+    data = request.get_json(silent=True) or {}
+    patient_name = (data.get("patient_name") or "").strip()[:100]
+    if not patient_name:
+        return fail("Patient name is required.", 400)
+
+    vitals = {k: to_float(data.get(k)) for k in VITAL_LIMITS}
+    if all(v is None for v in vitals.values()):
+        return fail("Enter at least one vital sign.", 400)
+    for key, value in vitals.items():
+        low, high = VITAL_LIMITS[key]
+        if value is not None and not low <= value <= high:
+            return fail(f"{key.replace('_', ' ').upper()} {value:g} looks like a typing error. Check the reading.", 400)
+    if vitals["sys_bp"] and vitals["dia_bp"] and vitals["sys_bp"] <= vitals["dia_bp"]:
+        return fail("Systolic BP must be higher than diastolic BP.", 400)
+
+    tier, triggers, notes = compute_triage(vitals)
+
+    enc = None
+    if data.get("encounter_id"):
+        enc = get_owned_encounter(data["encounter_id"])
+        if not enc:
+            return fail("Encounter not found.", 404)
+    else:
+        enc = Encounter(patient_name=patient_name, origin_worker_id=session["worker_id"],
+                        origin_facility_id=session["facility_id"])
+        db.session.add(enc)
+    enc.patient_name = patient_name
+    merge_vitals(enc, vitals)
+    enc.triage_tier, enc.triage_notes = tier, notes
+    enc.tc_steps_triage = json.dumps({"triggers": triggers})
+    advance_stage(enc, "triage")
+    db.session.commit()
+
+    return jsonify({"encounter_id": enc.id,
+                    "triage_data": {"tier": tier, "trigger": "; ".join(triggers), "notes": notes}})
+
+
+@app.route("/api/diagnosis", methods=["POST"])
+@login_required
+def api_diagnosis():
+    data = request.get_json(silent=True) or {}
+
+    # Step 2: the worker has chosen a diagnosis; save it.
+    if "selected_diagnosis" in data:
+        enc = get_owned_encounter(data.get("encounter_id"))
+        if not enc:
+            return fail("Encounter not found.", 404)
+        selected = (data.get("selected_diagnosis") or "").strip()[:500]
+        if not selected:
+            return fail("Choose a diagnosis first.", 400)
+        enc.diagnosis_notes = selected
+        enc.diagnosis_medications = (data.get("medications") or "").strip()[:1000] or None
+        advance_stage(enc, "diagnosis")
+        db.session.commit()
+        return jsonify({"status": "saved", "encounter_id": enc.id})
+
+    # Step 1: analyse symptoms and suggest options.
+    patient_name = (data.get("patient_name") or "").strip()[:100]
+    symptoms = (data.get("symptoms") or "").strip()[:2000]
+    if not patient_name or not symptoms:
+        return fail("Patient name and symptoms are required.", 400)
+
+    vitals = {k: to_float(data.get(k)) for k in VITAL_LIMITS}
+    vitals_text = ", ".join(f"{k}: {v:g}" for k, v in vitals.items() if v is not None) or "not recorded"
+    prompt = f"""
+    You are a clinical decision-support assistant for a community health worker in Nigeria.
+    Patient symptoms: "{symptoms}"
+    Vitals: {vitals_text}
+    Suggest the 3 to 5 most likely diagnoses, most likely first. Consider diseases common in Nigeria (malaria, typhoid,
+    pneumonia, hypertension in pregnancy, etc.). The worker will choose; you do not decide.
+    Return ONLY valid JSON:
+    {{
+      "reasoning": "2 to 4 plain sentences explaining the pattern in the symptoms and vitals",
+      "options": ["Diagnosis 1", "Diagnosis 2", "Diagnosis 3"],
+      "source_reference": "Guideline or source this is based on (e.g. WHO IMCI, Nigeria STG), or 'Unknown'"
+    }}
+    """
+    try:
+        result = llm_json(prompt, 0.2)
+        options = [str(o).strip()[:120] for o in result.get("options", []) if str(o).strip()][:5]
+        if not options:
+            raise ValueError("No options returned")
+    except Exception as e:
+        return fail("Could not analyse the symptoms. Try again, or record the diagnosis yourself.", 502, e)
+
+    enc = None
+    if data.get("encounter_id"):
+        enc = get_owned_encounter(data["encounter_id"])
+        if not enc:
+            return fail("Encounter not found.", 404)
+    else:
+        enc = Encounter(patient_name=patient_name, origin_worker_id=session["worker_id"],
+                        origin_facility_id=session["facility_id"])
+        db.session.add(enc)
+    enc.patient_name = patient_name
+    enc.statement = enc.statement or symptoms
+    merge_vitals(enc, vitals)
+    reasoning = str(result.get("reasoning") or "")
+    source = str(result.get("source_reference") or "Unknown")
+    enc.tc_steps_diagnosis = json.dumps({"options": options, "reasoning": reasoning, "source": source})
+    advance_stage(enc, "diagnosis")
+    db.session.commit()
+
+    return jsonify({"encounter_id": enc.id, "options": options, "reasoning": reasoning, "source_reference": source})
+
+
+@app.route("/api/referral", methods=["POST"])
+@login_required
+def generate_referral():
+    data = request.get_json(silent=True) or {}
+    patient_name = (data.get("patient_name") or "").strip()[:100]
+    center_id = data.get("center_id")
+    reason = (data.get("reason") or "").strip()[:1000]
+    if not patient_name or not center_id or not reason:
+        return fail("Patient name, center and reason are required.", 400)
+
+    dest = db.session.get(MedicalCenter, center_id)
+    if not dest:
+        return fail("Invalid medical center.", 404)
+
+    try:
+        if data.get("encounter_id"):
+            enc = get_owned_encounter(data["encounter_id"])
+            if not enc:
+                return fail("Encounter not found.", 404)
+        else:
+            enc = Encounter(patient_name=patient_name)
+            db.session.add(enc)
+
+        code = enc.referral_code if enc.referral_code and enc.destination_facility_id == dest.id \
+            else generate_referral_code(dest.short_code)
+        enc.patient_name = patient_name
+        enc.referral_reason = reason
+        enc.referral_facility = dest.name
+        enc.referral_code = code
+        enc.referral_qr = make_qr_data_uri(code)
+        enc.origin_worker_id = session["worker_id"]
+        enc.origin_facility_id = session["facility_id"]
+        enc.destination_facility_id = dest.id
+        enc.referral_status = "pending"
+        enc.current_stage = "referral"
+        enc.status = "referred"
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return fail("Could not create the referral. Try again.", 500, e)
+
+    return jsonify({"encounter_id": enc.id, "referral_code": code, "referral_qr": enc.referral_qr,
+                    "facility": dest.name, "patient_name": patient_name, "reason": reason})
+
+
+@app.route("/api/lookup", methods=["POST"])
+@login_required
+def lookup_patient():
+    data = request.get_json(silent=True) or {}
+    code = (data.get("code") or "").strip().upper()
+    if not code:
+        return fail("Please enter a referral code.", 400)
+
+    enc = Encounter.query.filter_by(referral_code=code).first()
+    if not enc:
+        return fail("No patient found with this code.", 404)
+    if enc.destination_facility_id != session["facility_id"]:
+        return fail("Access denied: this referral is not addressed to your facility.", 403)
+
+    if enc.referral_status == "pending":
+        enc.referral_status = "fulfilled"
+        db.session.commit()
+
+    return jsonify({
+        "patient_name": enc.patient_name,
+        "referral_code": enc.referral_code,
+        "facility": enc.referral_facility,
+        "reason": enc.referral_reason,
+        "referral_status": enc.referral_status,
+        "triage_tier": enc.triage_tier,
+        "triage_notes": enc.triage_notes,
+        "diagnosis": enc.diagnosis_notes,
+        "medications": enc.diagnosis_medications,
+        "vitals": json.loads(enc.vitals_json) if enc.vitals_json else {},
+        "created_at": enc.created_at.strftime("%Y-%m-%d %H:%M"),
+    })
+
+
+@app.route("/api/patient_voice", methods=["POST"])
+def patient_voice():
+    phone = clean_phone(request.form.get("phone_number"))
+    audio_file = request.files.get("audio")
+    if not phone or not audio_file:
+        return fail("Missing a valid phone number or audio.", 400)
+
+    try:
+        user_text = transcribe(audio_file)
+    except ValueError as e:
+        return fail(str(e), 400)
+    except Exception as e:
+        return fail("Could not understand the audio. Please speak clearly.", 400, e)
+
+    try:
+        patient = Patient.query.filter_by(phone_number=phone).first()
+        if not patient:
+            patient = Patient(phone_number=phone, preferred_language="ha")
+            db.session.add(patient)
+            db.session.flush()
+
+        translated = llm_text([
+            {"role": "system", "content": "Translate to English. Return ONLY the translated text."},
+            {"role": "user", "content": user_text},
+        ], 0.3)
+
+        recent = (ChatMessage.query.filter_by(patient_id=patient.id)
+                  .order_by(ChatMessage.created_at.desc()).limit(10).all())[::-1]
+        recent_text = "\n".join(f"{m.role}: {m.translated_text or m.original_text}" for m in recent)
+
+        long_term = ""
+        keywords = extract_search_keywords(translated)
+        if keywords:
+            memories = (MemoryIndex.query
+                        .filter(MemoryIndex.patient_id == patient.id, MemoryIndex.keywords.any(Keyword.word.in_(keywords)))
+                        .order_by(MemoryIndex.created_at.desc()).limit(5).all())
+            long_term = "\n".join(f"Past Context: {m.context_chunk}" for m in memories)
+
+        ai = answer_patient(user_text, translated, long_term, recent_text)
+        answer_en = ai.get("answer_english", "")
+        answer_local = ai.get("answer_local") or answer_en
+        detected = str(ai.get("detected_language", "English")).lower()
+
+        db.session.add_all([
+            ChatMessage(patient_id=patient.id, role="user", original_text=user_text, translated_text=translated),
+            ChatMessage(patient_id=patient.id, role="ai", original_text=answer_local, translated_text=answer_en),
+        ])
+        kws = [str(k) for k in ai.get("keywords", []) if str(k).strip()][:10]
+        if kws:
+            memory = MemoryIndex(patient_id=patient.id, context_chunk=f"User: {translated}\nAI: {answer_en}")
+            memory.keywords = [get_or_create_keyword(k) for k in kws]
+            db.session.add(memory)
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return fail("Something went wrong. Please try again.", 500, e)
+
+    return jsonify({"user_text": user_text, "ai_text_local": answer_local,
+                    "audio_url": speak(answer_local, "ha" if "haus" in detected else "en")})
+
+
+def answer_patient(user_text, translated_text, past_memories, recent_chat):
+    prompt = f"""
+    You are a trusted, empathetic health worker speaking to a Nigerian patient.
+    Answer their question directly, simply, and calmly. If there are red-flag symptoms, advise them to see a doctor immediately.
+    Do not name prescription drugs or doses. For emergencies, tell them to go to the nearest hospital now.
+
+    PAST CONTEXT (Their history):
+    {past_memories or 'No past history.'}
+
+    RECENT CONVERSATION:
+    {recent_chat or 'This is the first message.'}
+
+    CURRENT QUESTION (Translated to English for your understanding):
+    "{translated_text}"
+
+    ORIGINAL QUESTION (Use this ONLY to detect the language they are speaking):
+    "{user_text}"
+
+    INSTRUCTIONS:
+    1. Detect the language of the ORIGINAL QUESTION (it will be Hausa, Nigerian Pidgin, or English).
+    2. Formulate your medical answer in THAT EXACT SAME DETECTED LANGUAGE.
+
+    Return ONLY valid JSON in this exact format:
+    {{
+      "answer_english": "The medical answer in simple English (for our records).",
+      "answer_local": "Your medical answer in the DETECTED language (Hausa, Pidgin, or English).",
+      "detected_language": "Hausa" or "Pidgin" or "English",
+      "keywords": ["word1", "word2", "number3"]
+    }}
+    """
+    try:
+        return llm_json(prompt, 0.3)
+    except Exception:
+        logger.exception("Patient answer failed")
+        return {"answer_english": "Error", "answer_local": "Na sami matsala, gwada sake.",
+                "detected_language": "Hausa", "keywords": []}
+
+
+if __name__ == "__main__":
+    app.run(debug=DEBUG, port=int(os.getenv("PORT", 5000)))
