@@ -1,0 +1,55 @@
+/* SmartHealth: only what Tailwind utilities can't express cleanly. */
+:root { --safe-bottom: env(safe-area-inset-bottom, 0px); }
+html { -webkit-text-size-adjust: 100%; }
+body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+
+:focus-visible { outline: 3px solid #059669; outline-offset: 2px; border-radius: 6px; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+/* Bottom navigation clears the iPhone home indicator */
+.tabbar { padding-bottom: calc(0.25rem + var(--safe-bottom)); }
+
+/* Severity rail: left edge of a ledger row encodes triage tier */
+.rail { border-left-width: 6px; }
+.rail-RED { border-left-color: #DC2626; }
+.rail-YELLOW { border-left-color: #D97706; }
+.rail-GREEN { border-left-color: #059669; }
+.rail-NONE { border-left-color: #CBD5E1; }
+
+/* Toasts */
+#toasts { position: fixed; top: calc(0.75rem + env(safe-area-inset-top, 0px)); left: 0; right: 0; z-index: 60;
+  display: flex; flex-direction: column; align-items: center; gap: .5rem; pointer-events: none; padding: 0 1rem; }
+.toast { pointer-events: auto; max-width: 28rem; width: 100%; padding: .75rem 1rem; border-radius: .75rem; font-size: .875rem;
+  font-weight: 600; color: #fff; background: #0F172A; box-shadow: 0 8px 24px rgb(15 23 42 / .25); transition: opacity .3s, transform .3s; }
+.toast-success { background: #047857; }
+.toast-error { background: #B91C1C; }
+.toast-out { opacity: 0; transform: translateY(-6px); }
+
+/* Spinner used inside buttons */
+.spinner { width: 1.1em; height: 1.1em; border-radius: 50%; border: 2.5px solid currentColor; border-right-color: transparent;
+  display: inline-block; animation: spin .7s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Connectivity pill */
+#netPill[data-online="true"] i { background: #34D399; }
+#netPill[data-online="false"] i { background: #FBBF24; }
+
+/* Patient voice button */
+@keyframes pulse-ring { 0% { transform: scale(1); opacity: .8; } 100% { transform: scale(1.55); opacity: 0; } }
+.mic.recording { background: #DC2626 !important; }
+.mic.recording .mic-ring { animation: pulse-ring 1.4s cubic-bezier(.215,.61,.355,1) infinite; }
+.mic.thinking { background: #D97706 !important; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+  .spinner { animation: none; border-right-color: currentColor; opacity: .6; }
+}
+
+/* Referral slip prints on its own */
+@media print {
+  header, nav.tabbar, #toasts, .no-print { display: none !important; }
+  body { background: #fff; }
+  main { padding: 0 !important; max-width: none !important; }
+  #referralCard { border: 2px solid #0F172A !important; }
+}

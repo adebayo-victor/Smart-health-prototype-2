@@ -1,0 +1,21 @@
+{
+  "id": "/",
+  "name": "SmartHealth PWA",
+  "short_name": "SmartHealth",
+  "description": "Offline-first clinical support for Nigerian communities.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F8FAFC",
+  "theme_color": "#0F172A",
+  "icons": [
+    { "src": "/static/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/static/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+  ],
+  "shortcuts": [
+    { "name": "Patient ledger", "url": "/dashboard" },
+    { "name": "New intake", "url": "/translator" },
+    { "name": "Look up referral", "url": "/lookup" }
+  ]
+}
