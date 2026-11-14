@@ -1,0 +1,9 @@
+flask==3.0.0
+Flask-SQLAlchemy==3.1.1
+groq==0.13.1
+openai>=1.55.3
+python-dotenv==1.0.1
+gunicorn
+httpx<0.28.0
+qrcode[pil]
+gTTS
