@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% from "_macros.html" import icon %}
+{% block title %}Welcome · SmartHealth{% endblock %}
+
+{% block content %}
+<div class="flex flex-col justify-center min-h-[70dvh] max-w-sm mx-auto">
+  <div class="w-16 h-16 bg-brand rounded-2xl flex items-center justify-center mb-6 shadow-lg shadow-brand/25">
+    {{ icon('heart', 'h-9 w-9 text-white') }}
+  </div>
+  <h2 class="text-3xl font-black text-ink leading-tight mb-2">Welcome</h2>
+  <p class="text-slate-600 mb-8">Select your mode to begin.</p>
+
+  <div class="space-y-3">
+    <a href="/login" class="group flex items-center gap-4 bg-ink text-white rounded-2xl p-4 min-h-20 shadow-md hover:bg-slate-800 transition">
+      <span class="w-12 h-12 rounded-xl bg-white/10 flex items-center justify-center">{{ icon('ledger', 'h-6 w-6') }}</span>
+      <span class="flex-1">
+        <span class="block font-bold">Proceed as Health Worker</span>
+        <span class="block text-sm text-slate-300">Intake, triage, diagnosis and referrals</span>
+      </span>
+      {{ icon('chevron', 'h-5 w-5 text-slate-400') }}
+    </a>
+
+    <a href="/patient" class="group flex items-center gap-4 bg-brand text-white rounded-2xl p-4 min-h-20 shadow-lg shadow-brand/20 hover:bg-brand-dark transition">
+      <span class="w-12 h-12 rounded-xl bg-white/15 flex items-center justify-center">{{ icon('chat', 'h-6 w-6') }}</span>
+      <span class="flex-1">
+        <span class="block font-bold">Proceed as Patient</span>
+        <span class="block text-sm text-emerald-100">Ask a health question by voice</span>
+      </span>
+      {{ icon('chevron', 'h-5 w-5 text-emerald-200') }}
+    </a>
+  </div>
+
+  <p class="text-sm text-slate-500 mt-10">Offline-first clinical support for Nigerian communities.</p>
+</div>
+{% endblock %}

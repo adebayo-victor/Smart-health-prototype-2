@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% from "_macros.html" import icon %}
+{% block title %}Offline · SmartHealth{% endblock %}
+
+{% block content %}
+<div class="text-center max-w-sm mx-auto mt-16">
+  <div class="w-16 h-16 bg-warn-soft text-warn rounded-2xl flex items-center justify-center mx-auto mb-5">{{ icon('wifi-off', 'h-8 w-8') }}</div>
+  <h1 class="text-xl font-black mb-2">You're offline</h1>
+  <p class="text-slate-600 mb-6">This page wasn't saved on your phone yet. Pages you have opened before still work. Reconnect to open new ones.</p>
+  <button onclick="location.reload()" class="min-h-12 px-6 bg-ink text-white rounded-xl font-bold">Try again</button>
+</div>
+{% endblock %}

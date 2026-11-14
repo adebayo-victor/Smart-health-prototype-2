@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% from "_macros.html" import icon %}
+{% block title %}Health worker login · SmartHealth{% endblock %}
+
+{% block content %}
+<div class="max-w-sm mx-auto mt-6">
+  <a href="/" class="inline-flex items-center gap-1 text-sm font-semibold text-slate-500 hover:text-ink mb-4 min-h-11">{{ icon('back', 'h-4 w-4') }} Back</a>
+  <div class="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+    <div class="w-14 h-14 bg-brand rounded-xl flex items-center justify-center mb-4">{{ icon('lock', 'h-7 w-7 text-white') }}</div>
+    <h2 class="text-xl font-black text-ink mb-1">Health Worker Login</h2>
+    <p class="text-sm text-slate-500 mb-6">Enter your assigned credentials to access the network.</p>
+
+    {% if error %}
+    <div role="alert" class="bg-danger-soft text-danger-dark text-sm font-semibold p-3 rounded-lg mb-4">{{ error }}</div>
+    {% endif %}
+
+    <form method="POST" class="space-y-4">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div>
+        <label for="username" class="text-sm font-semibold text-slate-600 block mb-1">Worker code or username</label>
+        <input id="username" type="text" name="username" required autocomplete="username" autocapitalize="characters" autofocus
+               class="w-full min-h-12 px-3 rounded-lg border border-slate-300 bg-surface text-base font-semibold" placeholder="e.g. MU2789">
+      </div>
+      <div>
+        <label for="password" class="text-sm font-semibold text-slate-600 block mb-1">Password</label>
+        <div class="relative">
+          <input id="password" type="password" name="password" required autocomplete="current-password"
+                 class="w-full min-h-12 pl-3 pr-16 rounded-lg border border-slate-300 bg-surface text-base font-semibold" placeholder="Your password">
+          <button type="button" id="togglePw" class="absolute right-1 top-1 min-h-10 px-3 text-sm font-bold text-brand hover:text-brand-dark">Show</button>
+        </div>
+      </div>
+      <button type="submit" class="w-full min-h-14 bg-ink text-white rounded-xl font-bold hover:bg-slate-800 transition">Log in</button>
+    </form>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const pw = document.getElementById('password'), t = document.getElementById('togglePw');
+  t.addEventListener('click', () => { const show = pw.type === 'password'; pw.type = show ? 'text' : 'password'; t.textContent = show ? 'Hide' : 'Show'; });
+</script>
+{% endblock %}

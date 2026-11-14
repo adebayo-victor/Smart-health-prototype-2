@@ -1,0 +1,171 @@
+{% extends "base.html" %}
+{% from "_macros.html" import icon, vitals_grid %}
+{% set active = 'diagnosis' %}
+{% block title %}Systemic footprint diagnosis · SmartHealth{% endblock %}
+
+{% block content %}
+<div class="flex items-center gap-3 mb-6">
+  <button id="backBtn" aria-label="Go back" class="w-11 h-11 -ml-2 flex items-center justify-center text-slate-500 hover:bg-slate-200/60 rounded-full transition">{{ icon('back', 'h-6 w-6') }}</button>
+  <div>
+    <h1 class="text-xl font-black leading-tight">Systemic footprint diagnosis</h1>
+    <p class="text-sm text-slate-500">The AI suggests. You decide.</p>
+  </div>
+</div>
+
+<!-- Input -->
+<div class="bg-white p-4 rounded-xl border border-slate-200 mb-4 space-y-4">
+  <div>
+    <label for="patient_name" class="text-sm font-semibold text-slate-600 block mb-1">Patient name *</label>
+    <input type="text" id="patient_name" maxlength="100" autocomplete="off" placeholder="e.g. Amina Yusuf"
+           class="w-full min-h-12 px-3 rounded-lg border border-slate-300 bg-surface text-base font-semibold">
+  </div>
+  <div>
+    <label for="symptoms" class="text-sm font-semibold text-slate-600 block mb-1">Symptoms or chief complaint *</label>
+    <textarea id="symptoms" rows="3" maxlength="2000" placeholder="e.g. High fever for 3 days, yellowing of eyes"
+              class="w-full px-3 py-2 rounded-lg border border-slate-300 bg-surface text-base"></textarea>
+  </div>
+</div>
+<div class="mb-6">{{ vitals_grid() }}</div>
+
+<button id="analyzeBtn" class="w-full min-h-14 bg-ink text-white rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-slate-800 transition mb-6">
+  Analyze symptoms
+</button>
+
+<!-- Results -->
+<section id="selectionArea" class="hidden space-y-4" aria-live="polite">
+  <div class="bg-info-soft p-4 rounded-xl border border-sky-200">
+    <p class="text-sm font-bold text-sky-800 mb-1">AI clinical reasoning</p>
+    <p id="aiReasoning" class="text-sm text-sky-950 leading-relaxed"></p>
+    <p id="aiSource" class="hidden mt-3 text-xs font-bold text-sky-800 bg-sky-100 px-2 py-1 rounded inline-block"></p>
+  </div>
+
+  <fieldset>
+    <legend class="text-sm font-bold text-slate-500 mb-2">Select the correct diagnosis</legend>
+    <div id="optionsContainer" class="space-y-2"></div>
+  </fieldset>
+
+  <div>
+    <label for="medications" class="text-sm font-semibold text-slate-600 block mb-1">Medication given or prescribed (optional)</label>
+    <input type="text" id="medications" maxlength="1000" placeholder="e.g. Artemether-lumefantrine, 3 days"
+           class="w-full min-h-12 px-3 rounded-lg border border-slate-300 bg-white text-base">
+  </div>
+
+  <p class="text-xs text-slate-500">This is decision support, not a diagnosis. Confirm against your clinical judgement and local guidelines.</p>
+  <p id="saveHint" class="text-center text-sm font-semibold text-slate-500">Select a diagnosis to enable saving</p>
+  <button id="saveBtn" disabled class="w-full min-h-14 rounded-xl font-bold bg-brand text-white hover:bg-brand-dark transition disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed">
+    Save diagnosis
+  </button>
+</section>
+
+<!-- Success -->
+<section id="successMessage" class="hidden p-5 bg-brand-soft border-2 border-brand rounded-xl text-center">
+  <p class="text-brand-dark font-bold mb-3">Diagnosis saved.</p>
+  <div class="grid grid-cols-2 gap-2">
+    <a id="goReferral" href="/referral" class="min-h-12 bg-ink text-white rounded-xl font-bold flex items-center justify-center">Refer patient</a>
+    <a href="/dashboard" class="min-h-12 bg-white border border-slate-300 rounded-xl font-bold flex items-center justify-center">Back to ledger</a>
+  </div>
+</section>
+
+<!-- Unsaved modal -->
+<div id="unsavedModal" class="hidden fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+  <div class="bg-white rounded-2xl p-6 max-w-sm w-full shadow-2xl">
+    <h3 id="modalTitle" class="text-lg font-black mb-2">No diagnosis selected</h3>
+    <p class="text-sm text-slate-600 mb-6">Save this case as <b>Undiagnosed</b> and leave, or keep working?</p>
+    <div class="flex gap-3">
+      <button id="modalCancel" class="flex-1 min-h-12 bg-slate-200 rounded-xl font-bold hover:bg-slate-300 transition">Keep working</button>
+      <button id="modalSave" class="flex-1 min-h-12 bg-warn text-white rounded-xl font-bold hover:bg-warn-dark transition">Save and exit</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const $ = (id) => document.getElementById(id);
+const VITALS = ['temp', 'hr', 'sys_bp', 'dia_bp', 'spo2'];
+let encounterId = new URLSearchParams(location.search).get('encounter_id');
+let selected = null, analysed = false, saved = false;
+
+// Pick up where triage or intake stopped.
+if (encounterId) {
+  SH.api(`/api/encounter/${encodeURIComponent(encounterId)}`, { method: 'GET' }).then((e) => {
+    $('patient_name').value = e.patient_name || '';
+    $('symptoms').value = e.conclusion || e.translation || '';
+    VITALS.forEach((k) => { if (e.vitals && e.vitals[k] != null) $(k).value = e.vitals[k]; });
+  }).catch(() => { encounterId = null; });
+}
+
+$('analyzeBtn').addEventListener('click', async (e) => {
+  const patient_name = $('patient_name').value.trim(), symptoms = $('symptoms').value.trim();
+  if (!patient_name || !symptoms) return SH.toast('Patient name and symptoms are required.', 'error');
+  const json = { patient_name, symptoms, encounter_id: encounterId };
+  VITALS.forEach((k) => { json[k] = $(k).value === '' ? null : parseFloat($(k).value); });
+
+  try {
+    const data = await SH.busy(e.currentTarget, 'Running systemic footprint analysis', () => SH.api('/api/diagnosis', { json }));
+    encounterId = data.encounter_id;
+    analysed = true;
+    render(data.options, data.reasoning, data.source_reference);
+  } catch (err) { SH.toast(err.message, 'error'); }
+});
+
+function render(options, reasoning, source) {
+  $('aiReasoning').textContent = reasoning;
+  const src = $('aiSource');
+  src.classList.toggle('hidden', !source || source === 'Unknown');
+  src.textContent = 'Source: ' + source;
+
+  selected = null; setReady(null);
+  $('optionsContainer').innerHTML = options.map((o, i) => `
+    <label class="option flex items-center gap-3 p-4 min-h-14 bg-white rounded-xl border-2 border-slate-200 cursor-pointer hover:bg-slate-50 transition">
+      <input type="radio" name="dx" value="${i}" class="w-5 h-5 accent-emerald-600">
+      <span class="font-bold">${SH.esc(o)}</span>
+    </label>`).join('');
+  $('optionsContainer').querySelectorAll('input').forEach((r) => r.addEventListener('change', () => {
+    selected = options[+r.value];
+    $('optionsContainer').querySelectorAll('.option').forEach((l) => {
+      const on = l.contains(r) && r.checked;
+      l.classList.toggle('border-brand', on); l.classList.toggle('bg-brand-soft', on);
+      l.classList.toggle('border-slate-200', !on);
+    });
+    setReady(selected);
+  }));
+  $('selectionArea').classList.remove('hidden');
+  $('selectionArea').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function setReady(dx) {
+  $('saveBtn').disabled = !dx;
+  $('saveHint').textContent = dx ? 'Ready to save: ' + dx : 'Select a diagnosis to enable saving';
+  $('saveHint').className = 'text-center text-sm font-semibold ' + (dx ? 'text-brand-dark' : 'text-slate-500');
+}
+
+async function finalize(text) {
+  await SH.api('/api/diagnosis', { json: { encounter_id: encounterId, selected_diagnosis: text, medications: $('medications').value.trim() } });
+  saved = true;
+}
+
+$('saveBtn').addEventListener('click', async (e) => {
+  if (!selected) return;
+  try {
+    await SH.busy(e.currentTarget, 'Saving', () => finalize(selected));
+    $('selectionArea').classList.add('hidden');
+    $('analyzeBtn').classList.add('hidden');
+    $('goReferral').href = `/referral?encounter_id=${encounterId}`;
+    $('successMessage').classList.remove('hidden');
+    SH.toast('Diagnosis saved.', 'success');
+  } catch (err) { SH.toast(err.message, 'error'); }
+});
+
+// Back button: don't silently lose an analysed case.
+$('backBtn').addEventListener('click', () => {
+  if (analysed && !selected && !saved) $('unsavedModal').classList.remove('hidden');
+  else location.href = '/dashboard';
+});
+$('modalCancel').addEventListener('click', () => $('unsavedModal').classList.add('hidden'));
+$('modalSave').addEventListener('click', async () => {
+  try { await finalize('Undiagnosed'); location.href = '/dashboard'; }
+  catch (err) { SH.toast(err.message, 'error'); }
+});
+</script>
+{% endblock %}

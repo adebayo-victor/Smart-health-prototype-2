@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+{% from "_macros.html" import icon %}
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="csrf-token" content="{{ csrf_token }}">
+  <meta name="theme-color" content="#0F172A">
+  <title>{% block title %}SmartHealth{% endblock %}</title>
+
+  <link rel="manifest" href="/static/manifest.json">
+  <link rel="icon" type="image/png" href="/static/icons/icon-192.png">
+  <link rel="apple-touch-icon" href="/static/icons/icon-192.png">
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    // Design tokens. Named by role so they never collide with Tailwind's built-in palettes.
+    tailwind.config = { theme: { extend: { colors: {
+      ink: '#0F172A',
+      surface: '#F8FAFC',
+      brand: { DEFAULT: '#059669', dark: '#047857', soft: '#ECFDF5' },
+      danger: { DEFAULT: '#DC2626', dark: '#B91C1C', soft: '#FEF2F2' },
+      warn: { DEFAULT: '#D97706', dark: '#B45309', soft: '#FFFBEB' },
+      info: { DEFAULT: '#0284C7', soft: '#F0F9FF' }
+    } } } };
+  </script>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+
+<body class="min-h-dvh bg-surface text-ink antialiased flex flex-col">
+  <a href="#main" class="sr-only focus:not-sr-only focus:absolute focus:z-50 focus:bg-white focus:p-3">Skip to content</a>
+
+  <header class="bg-ink text-white shadow-md sticky top-0 z-30" style="padding-top: env(safe-area-inset-top, 0px)">
+    <div class="max-w-2xl mx-auto px-4 h-14 flex items-center gap-3">
+      <a href="{{ '/dashboard' if current_worker else '/' }}" class="flex items-center gap-2.5 min-w-0">
+        <span class="w-8 h-8 bg-brand rounded-lg flex items-center justify-center">{{ icon('heart', 'h-5 w-5 text-white') }}</span>
+        <span class="text-lg font-black tracking-tight">SmartHealth</span>
+      </a>
+      <div class="ml-auto flex items-center gap-2">
+        <span id="netPill" data-online="true" class="flex items-center gap-1.5 text-xs font-semibold bg-white/10 rounded-full px-2.5 py-1">
+          <i class="w-2 h-2 rounded-full inline-block"></i><span>Online</span>
+        </span>
+        {% if current_worker %}
+        <a href="/logout" aria-label="Log out" title="Log out as {{ current_worker.name }}" class="w-10 h-10 flex items-center justify-center rounded-full hover:bg-white/10">
+          {{ icon('logout') }}
+        </a>
+        {% endif %}
+      </div>
+    </div>
+    {% if current_worker %}
+    <p class="max-w-2xl mx-auto px-4 pb-2 -mt-1 text-xs text-slate-400 truncate">{{ current_worker.name }}, {{ current_worker.facility }}</p>
+    {% endif %}
+  </header>
+
+  <main id="main" class="flex-1 w-full mx-auto {{ main_class | default('max-w-2xl px-4 pt-5 ' ~ ('pb-28' if current_worker else 'pb-10')) }}">
+    {% block content %}{% endblock %}
+  </main>
+
+  {% if current_worker and not bare %}
+  {% set tabs = [
+    ('ledger', '/dashboard', 'Ledger', 'ledger'),
+    ('intake', '/translator', 'Intake', 'mic'),
+    ('triage', '/triage', 'Triage', 'triage'),
+    ('diagnosis', '/diagnosis', 'Diagnosis', 'diagnosis'),
+    ('referral', '/referral', 'Refer', 'referral'),
+    ('lookup', '/lookup', 'Lookup', 'search')
+  ] %}
+  <nav class="tabbar fixed bottom-0 inset-x-0 z-30 bg-white border-t border-slate-200" aria-label="Main">
+    <ul class="max-w-2xl mx-auto grid grid-cols-6">
+      {% for key, href, label, ic in tabs %}
+      <li>
+        <a href="{{ href }}" {% if active == key %}aria-current="page"{% endif %}
+           class="flex flex-col items-center justify-center gap-0.5 min-h-14 text-[11px] font-semibold transition {{ 'text-brand' if active == key else 'text-slate-500 hover:text-ink' }}">
+          {{ icon(ic, 'h-6 w-6') }}{{ label }}
+        </a>
+      </li>
+      {% endfor %}
+    </ul>
+  </nav>
+  {% endif %}
+
+  <div id="toasts" aria-live="polite"></div>
+  <script src="/static/app.js"></script>
+  {% if request.path == '/login' %}
+  <script>navigator.serviceWorker && navigator.serviceWorker.ready.then(r => r.active && r.active.postMessage('clear-pages'));</script>
+  {% endif %}
+  {% block scripts %}{% endblock %}
+</body>
+</html>

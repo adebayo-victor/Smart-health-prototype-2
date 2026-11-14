@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% from "_macros.html" import icon, page_header %}
+{% set active = 'lookup' %}
+{% block title %}Patient lookup · SmartHealth{% endblock %}
+
+{% block content %}
+{{ page_header('Patient lookup', '/dashboard', 'Enter the referral code the patient brought.') }}
+
+<form id="lookupForm" class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm mb-6">
+  <label for="codeInput" class="text-sm font-semibold text-slate-600 block mb-2">Referral code</label>
+  <div class="flex gap-2">
+    <input type="text" id="codeInput" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="20" placeholder="e.g. AK-J8RQEE"
+           class="flex-1 min-w-0 min-h-14 px-4 rounded-xl border-2 border-slate-300 bg-surface text-xl font-black text-center uppercase tracking-wider focus:border-brand">
+    <button type="submit" id="searchBtn" class="min-h-14 px-6 bg-ink text-white rounded-xl font-bold hover:bg-slate-800 transition">Search</button>
+  </div>
+  <p id="errorMsg" role="alert" class="hidden text-danger-dark text-sm font-semibold mt-3 text-center"></p>
+</form>
+
+<section id="patientRecord" class="hidden space-y-3" aria-live="polite">
+  <div class="bg-brand-soft p-5 rounded-2xl border-2 border-brand text-center">
+    <p class="text-sm font-bold text-brand-dark mb-1">Patient identified</p>
+    <h2 id="pName" class="text-2xl font-black"></h2>
+    <p class="text-sm font-semibold text-brand-dark mt-2">
+      Code <span id="pCode" class="font-black tracking-wider"></span>, status
+      <span id="pStatus" class="capitalize bg-white px-2 py-0.5 rounded"></span>
+    </p>
+    <span id="pTier" class="hidden mt-3 text-sm font-bold px-3 py-1 rounded-full"></span>
+  </div>
+
+  <div class="bg-white p-4 rounded-xl border border-slate-200">
+    <p class="text-sm font-semibold text-slate-500 mb-1">Referral reason</p>
+    <p id="pReason" class="font-bold"></p>
+    <p class="text-sm text-slate-500 mt-2">To: <span id="pFacility" class="font-bold text-slate-700"></span></p>
+  </div>
+  <div class="bg-white p-4 rounded-xl border border-slate-200">
+    <p class="text-sm font-semibold text-slate-500 mb-1">Triage and vitals</p>
+    <p id="pTriage"></p>
+    <div id="pVitals" class="flex flex-wrap gap-1.5 mt-2"></div>
+  </div>
+  <div class="bg-white p-4 rounded-xl border border-slate-200">
+    <p class="text-sm font-semibold text-slate-500 mb-1">Diagnosis and treatment</p>
+    <p id="pDiag"></p>
+    <p id="pMeds" class="text-sm text-slate-600 mt-2"></p>
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const $ = (id) => document.getElementById(id);
+const TIER = { RED: ['Red', 'bg-danger text-white'], YELLOW: ['Yellow', 'bg-warn text-white'], GREEN: ['Green', 'bg-brand text-white'] };
+const VITAL_LABELS = { temp: 'Temp', hr: 'HR', sys_bp: 'Sys', dia_bp: 'Dia', bp_sys: 'Sys', bp_dia: 'Dia', spo2: 'SpO2' };
+
+async function lookup(code) {
+  $('errorMsg').classList.add('hidden'); $('patientRecord').classList.add('hidden');
+  if (!code) { $('errorMsg').textContent = 'Enter a referral code.'; return $('errorMsg').classList.remove('hidden'); }
+  try {
+    const d = await SH.busy($('searchBtn'), 'Searching', () => SH.api('/api/lookup', { json: { code } }));
+    $('pName').textContent = d.patient_name;
+    $('pCode').textContent = d.referral_code;
+    $('pStatus').textContent = d.referral_status;
+    $('pReason').textContent = d.reason || '';
+    $('pFacility').textContent = d.facility || '';
+    $('pTriage').textContent = d.triage_notes || 'No triage notes available.';
+    $('pDiag').textContent = d.diagnosis || 'No diagnosis recorded.';
+    $('pMeds').textContent = d.medications ? 'Medication: ' + d.medications : '';
+
+    const tier = $('pTier'), t = TIER[d.triage_tier];
+    tier.classList.toggle('hidden', !t);
+    if (t) { tier.className = `inline-block mt-3 text-sm font-bold px-3 py-1 rounded-full ${t[1]}`; tier.textContent = t[0] + ' triage'; }
+
+    $('pVitals').innerHTML = Object.entries(d.vitals || {}).filter(([, v]) => v !== null && v !== 'N/A' && v !== '')
+      .map(([k, v]) => `<span class="px-2 py-1 rounded-lg bg-slate-100 text-xs font-semibold tabular-nums">${SH.esc(VITAL_LABELS[k] || k)} ${SH.esc(v)}</span>`).join('');
+    $('patientRecord').classList.remove('hidden');
+    $('patientRecord').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } catch (err) {
+    $('errorMsg').textContent = err.message; $('errorMsg').classList.remove('hidden');
+  }
+}
+
+$('lookupForm').addEventListener('submit', (e) => { e.preventDefault(); lookup($('codeInput').value.trim()); });
+const initial = new URLSearchParams(location.search).get('code');
+if (initial) { $('codeInput').value = initial.toUpperCase(); lookup(initial); }
+</script>
+{% endblock %}

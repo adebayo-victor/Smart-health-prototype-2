@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% from "_macros.html" import icon, page_header, vitals_grid %}
+{% set active = 'triage' %}
+{% block title %}Offline triage · SmartHealth{% endblock %}
+
+{% block content %}
+{{ page_header('Offline triage settler', '/dashboard', 'Rules run on your phone. No AI or signal needed to get a result.') }}
+
+<div class="bg-white p-4 rounded-xl border border-slate-200 mb-4">
+  <label for="patient_name" class="text-sm font-semibold text-slate-600 block mb-1">Patient name *</label>
+  <input type="text" id="patient_name" maxlength="100" autocomplete="off" placeholder="e.g. Amina Yusuf"
+         class="w-full min-h-12 px-3 rounded-lg border border-slate-300 bg-surface text-base font-semibold">
+</div>
+
+<div class="mb-6">{{ vitals_grid() }}</div>
+
+<button id="processBtn" class="w-full min-h-14 bg-ink text-white rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-slate-800 transition mb-6">
+  Process triage
+</button>
+
+<section id="triageResult" class="hidden rounded-2xl border-2 p-5 mb-6" aria-live="polite">
+  <div class="flex items-center gap-4 mb-3">
+    <span id="resultIcon"></span>
+    <div class="min-w-0">
+      <p id="resultTier" class="text-2xl font-black"></p>
+      <p id="resultTrigger" class="text-sm font-semibold mt-1"></p>
+    </div>
+  </div>
+  <p id="resultNotes" class="text-sm bg-white/70 p-3 rounded-lg border border-black/5"></p>
+  <div class="grid grid-cols-2 gap-2 mt-4">
+    <a id="nextDiagnosis" href="/diagnosis" class="min-h-12 bg-ink text-white rounded-xl font-bold flex items-center justify-center hover:bg-slate-800 transition">Run diagnosis</a>
+    <a id="nextReferral" href="/referral" class="min-h-12 bg-white text-ink border border-slate-300 rounded-xl font-bold flex items-center justify-center hover:bg-slate-50 transition">Refer patient</a>
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const $ = (id) => document.getElementById(id);
+const VITALS = ['temp', 'hr', 'sys_bp', 'dia_bp', 'spo2'];
+let encounterId = new URLSearchParams(location.search).get('encounter_id');
+
+// Pick up where intake stopped.
+if (encounterId) {
+  SH.api(`/api/encounter/${encodeURIComponent(encounterId)}`, { method: 'GET' }).then((e) => {
+    $('patient_name').value = e.patient_name || '';
+    VITALS.forEach((k) => { if (e.vitals && e.vitals[k] != null) $(k).value = e.vitals[k]; });
+  }).catch(() => { encounterId = null; });
+}
+
+const TIERS = {
+  RED:    { box: 'bg-danger-soft border-danger', text: 'text-danger-dark', label: 'Red: act now',          icon: 'M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z' },
+  YELLOW: { box: 'bg-warn-soft border-warn',     text: 'text-warn-dark',   label: 'Yellow: assess soon',   icon: 'M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z' },
+  GREEN:  { box: 'bg-brand-soft border-brand',   text: 'text-brand-dark',  label: 'Green: stable',         icon: 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z' },
+};
+
+$('processBtn').addEventListener('click', async (e) => {
+  const patient_name = $('patient_name').value.trim();
+  if (!patient_name) { SH.toast('Enter the patient name.', 'error'); return $('patient_name').focus(); }
+  const json = { patient_name, encounter_id: encounterId };
+  VITALS.forEach((k) => { json[k] = $(k).value === '' ? null : parseFloat($(k).value); });
+  if (VITALS.every((k) => json[k] === null)) return SH.toast('Enter at least one vital sign.', 'error');
+
+  try {
+    const data = await SH.busy(e.currentTarget, 'Processing', () => SH.api('/api/triage', { json }));
+    encounterId = data.encounter_id;
+    show(data.triage_data);
+    $('nextDiagnosis').href = `/diagnosis?encounter_id=${encounterId}`;
+    $('nextReferral').href = `/referral?encounter_id=${encounterId}`;
+  } catch (err) { SH.toast(err.message, 'error'); }
+});
+
+function show(t) {
+  const cfg = TIERS[t.tier] || TIERS.GREEN;
+  const box = $('triageResult');
+  box.className = `rounded-2xl border-2 p-5 mb-6 ${cfg.box}`;
+  $('resultTier').className = `text-2xl font-black ${cfg.text}`;
+  $('resultTier').textContent = cfg.label;
+  $('resultTrigger').className = `text-sm font-semibold mt-1 ${cfg.text}`;
+  $('resultTrigger').textContent = 'Triggered by: ' + t.trigger;
+  $('resultNotes').textContent = t.notes;
+  $('resultIcon').innerHTML = `<svg class="w-10 h-10 ${cfg.text}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" aria-hidden="true"><path d="${cfg.icon}"/></svg>`;
+  box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+</script>
+{% endblock %}

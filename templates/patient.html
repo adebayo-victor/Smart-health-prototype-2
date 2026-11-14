@@ -1,0 +1,165 @@
+{% extends "base.html" %}
+{% from "_macros.html" import icon %}
+{% set bare = true %}
+{% set main_class = 'max-w-2xl px-4 pt-0 pb-0 flex flex-col' %}
+{% block title %}Health Companion · SmartHealth{% endblock %}
+
+{% block content %}
+<div class="flex flex-col" style="height: calc(100dvh - 3.5rem - env(safe-area-inset-top, 0px))">
+
+  <!-- Entry -->
+  <section id="entryScreen" class="flex-1 flex flex-col items-center justify-center text-center py-6">
+    <div class="w-20 h-20 bg-brand rounded-2xl flex items-center justify-center mb-6 shadow-lg shadow-brand/25">{{ icon('mic', 'h-10 w-10 text-white') }}</div>
+    <h2 class="text-2xl font-black mb-2">Health Companion</h2>
+    <p class="text-slate-600 mb-8 max-w-xs">Enter your phone number to continue your private chat.</p>
+    <form id="entryForm" class="w-full max-w-sm space-y-4">
+      <label for="phoneNumber" class="sr-only">Phone number</label>
+      <input type="tel" id="phoneNumber" inputmode="tel" autocomplete="tel" placeholder="08012345678"
+             class="w-full min-h-14 px-4 rounded-xl border-2 border-slate-300 bg-white text-xl font-bold text-center tracking-widest focus:border-brand">
+      <p id="phoneError" role="alert" class="hidden text-sm font-semibold text-danger-dark"></p>
+      <button type="submit" class="w-full min-h-14 bg-ink text-white rounded-xl font-bold text-lg hover:bg-slate-800 transition shadow-lg">Start chatting</button>
+    </form>
+    <p class="text-xs text-slate-500 mt-6 max-w-xs">This is general health information, not a replacement for a clinic visit. In an emergency, go to the nearest hospital.</p>
+  </section>
+
+  <!-- Chat -->
+  <section id="chatScreen" class="hidden flex-col flex-1 min-h-0">
+    <div class="flex items-center gap-3 py-3 border-b border-slate-200">
+      <div class="w-10 h-10 bg-brand rounded-full flex items-center justify-center">{{ icon('heart', 'h-5 w-5 text-white') }}</div>
+      <div class="flex-1">
+        <h3 class="font-black leading-tight">Health Companion</h3>
+        <p class="text-xs font-semibold text-brand-dark">Always here to help</p>
+      </div>
+      <button id="changeNumber" class="min-h-11 px-2 text-sm font-semibold text-slate-500 hover:text-ink">Change number</button>
+    </div>
+
+    <div id="chatMessages" class="flex-1 overflow-y-auto space-y-4 py-4 scroll-smooth" aria-live="polite">
+      <div class="flex justify-start">
+        <div class="max-w-[85%] bg-brand-soft border border-brand/20 rounded-2xl rounded-tl-none p-4 shadow-sm">
+          <p class="leading-relaxed">Sannu! I am your health companion. You can speak to me in Hausa, Pidgin, or English. How can I help you today?</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="pt-3 pb-4 border-t border-slate-200">
+      <p id="statusText" class="text-center text-sm font-semibold text-slate-500 mb-3 h-5" role="status">Tap and hold to speak</p>
+      <div class="flex justify-center">
+        <button id="micButton" aria-label="Hold to speak" oncontextmenu="return false;"
+                class="mic relative w-20 h-20 rounded-full bg-ink text-white flex items-center justify-center shadow-xl transition active:scale-95 hover:bg-slate-800 select-none"
+                style="touch-action: none; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none;">
+          {{ icon('mic', 'h-8 w-8') }}
+          <span class="mic-ring absolute inset-0 rounded-full border-4 border-danger opacity-0"></span>
+        </button>
+      </div>
+      <p class="text-center text-xs text-slate-500 mt-3">Keyboard users: press and hold Space</p>
+    </div>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const $ = (id) => document.getElementById(id);
+const recorder = new SH.Recorder();
+const clips = [];                // audio data URIs, referenced by index from Replay buttons
+let phone = null, busy = false, current = null;
+
+// ---- Entry ----
+function enter(number) {
+  phone = number;
+  try { sessionStorage.setItem('sh_phone', number); } catch (_) {}
+  $('entryScreen').classList.add('hidden');
+  $('chatScreen').classList.remove('hidden'); $('chatScreen').classList.add('flex');
+}
+$('entryForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const n = $('phoneNumber').value.replace(/[^\d+]/g, '');
+  if (n.replace('+', '').length < 10 || n.replace('+', '').length > 15) {
+    $('phoneError').textContent = 'Enter a valid phone number, 10 to 15 digits.';
+    return $('phoneError').classList.remove('hidden');
+  }
+  enter(n);
+});
+$('changeNumber').addEventListener('click', () => {
+  try { sessionStorage.removeItem('sh_phone'); } catch (_) {}
+  location.reload();
+});
+try { const saved = sessionStorage.getItem('sh_phone'); if (saved) enter(saved); } catch (_) {}
+
+// ---- Hold to talk ----
+const mic = $('micButton');
+function ui(state) {
+  mic.classList.remove('recording', 'thinking');
+  const s = $('statusText');
+  s.className = 'text-center text-sm font-semibold mb-3 h-5 ' + ({ recording: 'text-danger-dark', thinking: 'text-warn-dark' }[state] || 'text-slate-500');
+  if (state === 'recording') { mic.classList.add('recording'); s.textContent = 'Listening. Release to send.'; }
+  else if (state === 'thinking') { mic.classList.add('thinking'); s.textContent = 'Thinking...'; }
+  else s.textContent = 'Tap and hold to speak';
+}
+
+async function press(e) {
+  e && e.preventDefault();
+  if (busy || recorder.active || !phone) return;
+  try { mic.setPointerCapture && e && e.pointerId != null && mic.setPointerCapture(e.pointerId); } catch (_) {}
+  ui('recording');
+  try { await recorder.start(); } catch (err) { ui('idle'); SH.toast(err.message, 'error'); }
+}
+
+async function release(e) {
+  e && e.preventDefault();
+  if (!recorder.active) return;
+  busy = true; ui('thinking');
+  const clip = await recorder.stop();
+  if (clip.blob.size < 2000) {
+    busy = false; ui('idle');
+    return SH.toast('Too short. Hold the button and speak for at least 2 seconds.', 'error');
+  }
+  const form = new FormData();
+  form.append('audio', clip.blob, clip.filename);
+  form.append('phone_number', phone);
+  try {
+    const d = await SH.api('/api/patient_voice', { form });
+    addMessage(d.user_text, 'user');
+    addMessage(d.ai_text_local, 'ai', d.audio_url);
+    if (d.audio_url) play(d.audio_url);
+  } catch (err) {
+    addMessage(err.message || "I'm sorry, I didn't catch that. Please try again.", 'ai');
+  } finally { busy = false; ui('idle'); }
+}
+
+mic.addEventListener('pointerdown', press);
+mic.addEventListener('pointerup', release);
+mic.addEventListener('pointercancel', release);
+mic.addEventListener('keydown', (e) => { if (e.code === 'Space' && !e.repeat) press(e); });
+mic.addEventListener('keyup', (e) => { if (e.code === 'Space') release(e); });
+
+// ---- Messages ----
+function addMessage(text, role, audioUrl) {
+  const user = role === 'user';
+  let replay = '';
+  if (!user && audioUrl) {
+    clips.push(audioUrl);
+    replay = `<button data-clip="${clips.length - 1}" class="replay mt-2 flex items-center gap-1.5 min-h-10 text-sm font-bold text-brand-dark hover:text-brand">
+      {{ icon('speaker', 'h-4 w-4') | replace('\n', '') }} Replay</button>`;
+  }
+  $('chatMessages').insertAdjacentHTML('beforeend', `
+    <div class="flex ${user ? 'justify-end' : 'justify-start'}">
+      <div class="max-w-[85%] rounded-2xl p-4 shadow-sm ${user ? 'bg-ink text-white rounded-tr-none' : 'bg-brand-soft border border-brand/20 rounded-tl-none'}">
+        <p class="leading-relaxed whitespace-pre-line">${SH.esc(text)}</p>${replay}
+      </div>
+    </div>`);
+  $('chatMessages').scrollTop = $('chatMessages').scrollHeight;
+}
+
+$('chatMessages').addEventListener('click', (e) => {
+  const b = e.target.closest('.replay');
+  if (b) play(clips[+b.dataset.clip]);
+});
+
+function play(url) {
+  if (current) current.pause();
+  current = new Audio(url);
+  current.play().catch(() => SH.toast('Tap Replay to hear the answer.', 'info'));
+}
+</script>
+{% endblock %}
