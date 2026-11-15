@@ -13,6 +13,7 @@ import random
 import re
 import secrets
 import string
+import tempfile
 import time
 import traceback
 from datetime import datetime, timezone
@@ -27,6 +28,8 @@ from groq import Groq
 from gtts import gTTS
 from openai import OpenAI
 from sqlalchemy import func
+from flask.sessions import SecureCookieSessionInterface
+from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
 # ==========================================
@@ -43,12 +46,30 @@ logger = logging.getLogger("smarthealth")
 
 app = Flask(__name__)
 
-_secret = os.getenv("SECRET_KEY")
-if not _secret:
-    # Never ship a hard-coded key. A random key keeps the app safe, but sessions
-    # reset on restart, so set SECRET_KEY in your host's environment variables.
-    _secret = secrets.token_hex(32)
-    logger.warning("SECRET_KEY is not set. Using a random key; sessions will not survive restarts.")
+def load_secret_key():
+    """Stable signing key. All gunicorn workers must share it, or logins bounce between workers."""
+    key = os.getenv("SECRET_KEY")
+    if key:
+        return key
+    # Fallback for hosts where SECRET_KEY isn't set: a key file shared by every worker in this container.
+    path = os.path.join(tempfile.gettempdir(), "smarthealth_secret_key")
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(secrets.token_hex(32))
+    except FileExistsError:
+        pass
+    logger.warning("SECRET_KEY is not set. Using a temporary shared key; set SECRET_KEY so logins survive restarts.")
+    for _ in range(20):  # another worker may still be writing the file
+        with open(path) as f:
+            key = f.read().strip()
+        if key:
+            return key
+        time.sleep(0.05)
+    return secrets.token_hex(32)
+
+
+_secret = load_secret_key()
 
 app.config.update(
     SECRET_KEY=_secret,
@@ -57,10 +78,21 @@ app.config.update(
     MAX_CONTENT_LENGTH=15 * 1024 * 1024,  # 15 MB audio uploads
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
-    SESSION_COOKIE_SECURE=not DEBUG,
     PERMANENT_SESSION_LIFETIME=60 * 60 * 12,
 )
 db = SQLAlchemy(app)
+
+# Behind Render/Heroku/Vercel the app sees plain http; trust the proxy's X-Forwarded-* headers.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+
+
+class AutoSecureSession(SecureCookieSessionInterface):
+    """Mark the cookie Secure only on https, so login also works on http://localhost and LAN testing."""
+    def get_cookie_secure(self, app):
+        return request.is_secure
+
+
+app.session_interface = AutoSecureSession()
 
 LLM_MODEL = os.getenv("LLM_MODEL", "gemini/gemini-1.5-flash")
 STAGES = ["translation", "triage", "diagnosis", "referral"]
