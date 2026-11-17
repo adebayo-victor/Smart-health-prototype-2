@@ -13,12 +13,8 @@
 </div>
 
 <!-- Input -->
-<div class="bg-white p-4 rounded-xl border border-slate-200 mb-4 space-y-4">
-  <div>
-    <label for="patient_name" class="text-sm font-semibold text-slate-600 block mb-1">Patient name *</label>
-    <input type="text" id="patient_name" maxlength="100" autocomplete="off" placeholder="e.g. Amina Yusuf"
-           class="w-full min-h-12 px-3 rounded-lg border border-slate-300 bg-surface text-base font-semibold">
-  </div>
+<div id="patientPicker" class="mb-4"></div>
+<div class="bg-white p-4 rounded-xl border border-slate-200 mb-4">
   <div>
     <label for="symptoms" class="text-sm font-semibold text-slate-600 block mb-1">Symptoms or chief complaint *</label>
     <textarea id="symptoms" rows="3" maxlength="2000" placeholder="e.g. High fever for 3 days, yellowing of eyes"
@@ -85,20 +81,22 @@ const $ = (id) => document.getElementById(id);
 const VITALS = ['temp', 'hr', 'sys_bp', 'dia_bp', 'spo2'];
 let encounterId = new URLSearchParams(location.search).get('encounter_id');
 let selected = null, analysed = false, saved = false;
+const picker = new SH.PatientPicker($('patientPicker'));
 
 // Pick up where triage or intake stopped.
 if (encounterId) {
   SH.api(`/api/encounter/${encodeURIComponent(encounterId)}`, { method: 'GET' }).then((e) => {
-    $('patient_name').value = e.patient_name || '';
+    if (e.patient) picker.setPatient(e.patient); else picker.suggest(e.patient_name);
     $('symptoms').value = e.conclusion || e.translation || '';
     VITALS.forEach((k) => { if (e.vitals && e.vitals[k] != null) $(k).value = e.vitals[k]; });
   }).catch(() => { encounterId = null; });
 }
 
 $('analyzeBtn').addEventListener('click', async (e) => {
-  const patient_name = $('patient_name').value.trim(), symptoms = $('symptoms').value.trim();
-  if (!patient_name || !symptoms) return SH.toast('Patient name and symptoms are required.', 'error');
-  const json = { patient_name, symptoms, encounter_id: encounterId };
+  const patient = picker.value, symptoms = $('symptoms').value.trim();
+  if (!patient) return picker.require();
+  if (!symptoms) return SH.toast('Describe the symptoms first.', 'error');
+  const json = { patient_id: patient.id, symptoms, encounter_id: encounterId };
   VITALS.forEach((k) => { json[k] = $(k).value === '' ? null : parseFloat($(k).value); });
 
   try {
