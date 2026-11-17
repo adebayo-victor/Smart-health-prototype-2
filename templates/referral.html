@@ -7,12 +7,9 @@
 <div class="no-print">{{ page_header('Generate referral', '/dashboard', 'Send the patient to another facility with a code and QR.') }}</div>
 
 <!-- Form -->
-<div id="referralForm" class="bg-white p-4 rounded-xl border border-slate-200 mb-6 space-y-4">
-  <div>
-    <label for="patient_name" class="text-sm font-semibold text-slate-600 block mb-1">Patient name *</label>
-    <input type="text" id="patient_name" maxlength="100" autocomplete="off" placeholder="e.g. Amina Yusuf"
-           class="w-full min-h-12 px-3 rounded-lg border border-slate-300 bg-surface text-base font-semibold">
-  </div>
+<div id="referralForm" class="space-y-4 mb-6">
+  <div id="patientPicker"></div>
+  <div class="bg-white p-4 rounded-xl border border-slate-200 space-y-4">
 
   <div>
     <label for="center_select" class="text-sm font-semibold text-slate-600 block mb-1">Destination center *</label>
@@ -34,6 +31,7 @@
   </div>
 
   <button id="generateBtn" class="w-full min-h-14 bg-ink text-white rounded-xl font-bold hover:bg-slate-800 transition">Generate referral and code</button>
+  </div>
 </div>
 
 <!-- Result -->
@@ -44,6 +42,7 @@
 
   <dl class="text-left bg-surface p-4 rounded-xl space-y-2 text-sm">
     <div class="flex gap-2"><dt class="font-semibold text-slate-500 w-24 shrink-0">Patient</dt><dd id="displayName" class="font-bold"></dd></div>
+    <div id="hidRow" class="hidden flex gap-2"><dt class="font-semibold text-slate-500 w-24 shrink-0">Sender ID</dt><dd id="displayHid" class="font-bold"></dd></div>
     <div class="flex gap-2"><dt class="font-semibold text-slate-500 w-24 shrink-0">Destination</dt><dd id="displayFacility" class="font-bold"></dd></div>
     <div class="flex gap-2"><dt class="font-semibold text-slate-500 w-24 shrink-0">Reason</dt><dd id="displayReason" class="font-bold"></dd></div>
   </dl>
@@ -62,11 +61,10 @@ const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
 let encounterId = params.get('encounter_id');
 let last = null;
-
-if (params.get('patient_name')) $('patient_name').value = params.get('patient_name');
+const picker = new SH.PatientPicker($('patientPicker'));
 if (encounterId) {
   SH.api(`/api/encounter/${encodeURIComponent(encounterId)}`, { method: 'GET' }).then((e) => {
-    $('patient_name').value = e.patient_name || $('patient_name').value;
+    if (e.patient) picker.setPatient(e.patient); else picker.suggest(e.patient_name);
     if (!$('reason').value) $('reason').value = [e.diagnosis, e.conclusion].find(Boolean) || '';
   }).catch(() => { encounterId = null; });
 }
@@ -82,16 +80,19 @@ document.querySelectorAll('.tag').forEach((b) => b.addEventListener('click', () 
 }));
 
 $('generateBtn').addEventListener('click', async (e) => {
-  const patient_name = $('patient_name').value.trim(), center_id = $('center_select').value, reason = $('reason').value.trim();
-  if (!patient_name || !center_id || !reason) return SH.toast('Fill in the patient name, destination and reason.', 'error');
+  const patient = picker.value, center_id = $('center_select').value, reason = $('reason').value.trim();
+  if (!patient) return picker.require();
+  if (!center_id || !reason) return SH.toast('Choose a destination and give a reason.', 'error');
   try {
     const data = await SH.busy(e.currentTarget, 'Generating', () =>
-      SH.api('/api/referral', { json: { patient_name, center_id, reason, encounter_id: encounterId } }));
+      SH.api('/api/referral', { json: { patient_id: patient.id, center_id, reason, encounter_id: encounterId } }));
     last = data;
     $('referralForm').classList.add('hidden');
     $('referralCard').classList.remove('hidden');
     $('displayCode').textContent = data.referral_code;
     $('displayName').textContent = data.patient_name;
+    const hid = data.patient && data.patient.hospital_id;
+    $('hidRow').classList.toggle('hidden', !hid); if (hid) $('displayHid').textContent = hid;
     $('displayFacility').textContent = data.facility;
     $('displayReason').textContent = data.reason;
     $('qrImg').src = data.referral_qr; $('qrImg').classList.remove('hidden');
