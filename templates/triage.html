@@ -6,11 +6,7 @@
 {% block content %}
 {{ page_header('Offline triage settler', '/dashboard', 'Rules run on your phone. No AI or signal needed to get a result.') }}
 
-<div class="bg-white p-4 rounded-xl border border-slate-200 mb-4">
-  <label for="patient_name" class="text-sm font-semibold text-slate-600 block mb-1">Patient name *</label>
-  <input type="text" id="patient_name" maxlength="100" autocomplete="off" placeholder="e.g. Amina Yusuf"
-         class="w-full min-h-12 px-3 rounded-lg border border-slate-300 bg-surface text-base font-semibold">
-</div>
+<div id="patientPicker" class="mb-4"></div>
 
 <div class="mb-6">{{ vitals_grid() }}</div>
 
@@ -39,11 +35,12 @@
 const $ = (id) => document.getElementById(id);
 const VITALS = ['temp', 'hr', 'sys_bp', 'dia_bp', 'spo2'];
 let encounterId = new URLSearchParams(location.search).get('encounter_id');
+const picker = new SH.PatientPicker($('patientPicker'));
 
 // Pick up where intake stopped.
 if (encounterId) {
   SH.api(`/api/encounter/${encodeURIComponent(encounterId)}`, { method: 'GET' }).then((e) => {
-    $('patient_name').value = e.patient_name || '';
+    if (e.patient) picker.setPatient(e.patient); else picker.suggest(e.patient_name);
     VITALS.forEach((k) => { if (e.vitals && e.vitals[k] != null) $(k).value = e.vitals[k]; });
   }).catch(() => { encounterId = null; });
 }
@@ -55,9 +52,9 @@ const TIERS = {
 };
 
 $('processBtn').addEventListener('click', async (e) => {
-  const patient_name = $('patient_name').value.trim();
-  if (!patient_name) { SH.toast('Enter the patient name.', 'error'); return $('patient_name').focus(); }
-  const json = { patient_name, encounter_id: encounterId };
+  const patient = picker.value;
+  if (!patient) return picker.require();
+  const json = { patient_id: patient.id, encounter_id: encounterId };
   VITALS.forEach((k) => { json[k] = $(k).value === '' ? null : parseFloat($(k).value); });
   if (VITALS.every((k) => json[k] === null)) return SH.toast('Enter at least one vital sign.', 'error');
 
