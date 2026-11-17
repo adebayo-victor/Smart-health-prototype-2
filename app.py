@@ -46,6 +46,18 @@ logger = logging.getLogger("smarthealth")
 
 app = Flask(__name__)
 
+
+def database_url():
+    """DATABASE_URL as given by the host, made SQLAlchemy-ready.
+    Aiven and Heroku give postgres://. SQLAlchemy needs a driver name, and its default driver changed between
+    versions, so name psycopg2 explicitly (the one in requirements.txt)."""
+    url = (os.getenv("DATABASE_URL") or "sqlite:////tmp/smarthealth.db").strip()
+    for prefix in ("postgres://", "postgresql://"):
+        if url.startswith(prefix):
+            return "postgresql+psycopg2://" + url[len(prefix):]
+    return url
+
+
 def load_secret_key():
     """Stable signing key. All gunicorn workers must share it, or logins bounce between workers."""
     key = os.getenv("SECRET_KEY")
@@ -73,8 +85,10 @@ _secret = load_secret_key()
 
 app.config.update(
     SECRET_KEY=_secret,
-    SQLALCHEMY_DATABASE_URI=os.getenv("DATABASE_URL", "sqlite:////tmp/smarthealth.db"),
+    SQLALCHEMY_DATABASE_URI=database_url(),
     SQLALCHEMY_TRACK_MODIFICATIONS=False,
+    # Hosted databases (Aiven, Neon, Render) drop idle connections; check before use and recycle often.
+    SQLALCHEMY_ENGINE_OPTIONS={} if database_url().startswith("sqlite") else {"pool_pre_ping": True, "pool_recycle": 280},
     MAX_CONTENT_LENGTH=15 * 1024 * 1024,  # 15 MB audio uploads
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
@@ -129,8 +143,46 @@ class Worker(db.Model):
         return check_password_hash(self.password_hash, password)
 
 
+class Patient(db.Model):
+    """A person registered at ONE facility. Each facility keeps its own register."""
+    __tablename__ = "patient"
+    id = db.Column(db.Integer, primary_key=True)
+    facility_id = db.Column(db.Integer, db.ForeignKey("medical_center.id"), nullable=False, index=True)
+    full_name = db.Column(db.String(100), nullable=False)
+    name_key = db.Column(db.String(120), nullable=False, index=True)  # lowercase, sorted words, for search
+    hospital_id = db.Column(db.String(40), nullable=True)  # the facility's own ID for this person
+    phone = db.Column(db.String(20), nullable=True)
+    age_years = db.Column(db.Integer, nullable=True)
+    sex = db.Column(db.String(1), nullable=True)  # F or M
+    village_lga = db.Column(db.String(100), nullable=True)
+    next_of_kin_name = db.Column(db.String(100), nullable=True)
+    next_of_kin_phone = db.Column(db.String(20), nullable=True)
+    is_pregnant = db.Column(db.Boolean, nullable=True)
+    allergies = db.Column(db.Text, nullable=True)
+    source_patient_id = db.Column(db.Integer, db.ForeignKey("patient.id"), nullable=True)  # record this one was copied from (referral)
+    merged_into_id = db.Column(db.Integer, db.ForeignKey("patient.id"), nullable=True)     # used by duplicate merging
+    is_active = db.Column(db.Boolean, nullable=False, default=True)
+    created_by_worker_id = db.Column(db.Integer, db.ForeignKey("worker.id"), nullable=True)
+    created_at = db.Column(db.DateTime, default=utcnow)
+    updated_at = db.Column(db.DateTime, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (db.UniqueConstraint("facility_id", "hospital_id", name="uq_patient_facility_hospital_id"),)
+
+    def to_dict(self):
+        return {
+            "id": self.id, "full_name": self.full_name, "hospital_id": self.hospital_id, "phone": self.phone,
+            "age_years": self.age_years, "sex": self.sex, "village_lga": self.village_lga,
+            "next_of_kin_name": self.next_of_kin_name, "next_of_kin_phone": self.next_of_kin_phone,
+            "is_pregnant": self.is_pregnant, "allergies": self.allergies,
+        }
+
+
 class Encounter(db.Model):
     id = db.Column(db.Integer, primary_key=True)
+    patient_id = db.Column(db.Integer, db.ForeignKey("patient.id"), nullable=True, index=True)
+    patient = db.relationship("Patient", foreign_keys=[patient_id])
+    facility_id = db.Column(db.Integer, db.ForeignKey("medical_center.id"), nullable=True, index=True)  # where it happened
+    referred_from_id = db.Column(db.Integer, db.ForeignKey("encounter.id"), nullable=True)  # sender's encounter, if received by referral
     patient_name = db.Column(db.String(100), nullable=False)
     dialect = db.Column(db.String(50), nullable=True)
     statement = db.Column(db.Text, nullable=True)
@@ -147,7 +199,7 @@ class Encounter(db.Model):
     referral_facility = db.Column(db.String(100), nullable=True)
     referral_code = db.Column(db.String(20), nullable=True, unique=True)
     referral_qr = db.Column(db.Text, nullable=True)
-    origin_worker_id = db.Column(db.Integer, db.ForeignKey("worker.id"), nullable=True)
+    origin_worker_id = db.Column(db.Integer, db.ForeignKey("worker.id"), nullable=True)  # who started it
     origin_facility_id = db.Column(db.Integer, db.ForeignKey("medical_center.id"), nullable=True)
     destination_facility_id = db.Column(db.Integer, db.ForeignKey("medical_center.id"), nullable=True)
     referral_status = db.Column(db.String(20), default="pending")
@@ -157,7 +209,9 @@ class Encounter(db.Model):
     updated_at = db.Column(db.DateTime, default=utcnow, onupdate=utcnow)
 
 
-class Patient(db.Model):
+# ---- Voice companion (the public patient portal). Separate from the clinical register above. ----
+class CompanionUser(db.Model):
+    __tablename__ = "companion_user"
     id = db.Column(db.Integer, primary_key=True)
     phone_number = db.Column(db.String(20), unique=True, nullable=False, index=True)
     display_name = db.Column(db.String(50), nullable=True)
@@ -172,7 +226,7 @@ class Keyword(db.Model):
 
 class ChatMessage(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    patient_id = db.Column(db.Integer, db.ForeignKey("patient.id"), nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("companion_user.id"), nullable=False, index=True)
     role = db.Column(db.String(10), nullable=False)
     original_text = db.Column(db.Text, nullable=False)
     translated_text = db.Column(db.Text, nullable=True)
@@ -188,7 +242,7 @@ memory_keywords = db.Table(
 
 class MemoryIndex(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    patient_id = db.Column(db.Integer, db.ForeignKey("patient.id"), nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("companion_user.id"), nullable=False, index=True)
     context_chunk = db.Column(db.Text, nullable=False)
     created_at = db.Column(db.DateTime, default=utcnow)
     keywords = db.relationship("Keyword", secondary=memory_keywords, backref="memories")
@@ -211,9 +265,10 @@ def seed_demo_data():
 
     w1 = Worker(username="chw_amina", full_name="Amina Bello", worker_code="MU2789", role="CHW", facility_id=mu.id)
     w2 = Worker(username="dr_yusuf", full_name="Dr. Yusuf Ali", worker_code="AK1001", role="Doctor", facility_id=ak.id)
-    for w in (w1, w2):
+    w3 = Worker(username="chw_ibrahim", full_name="Ibrahim Sani", worker_code="MU3001", role="CHW", facility_id=mu.id)
+    for w in (w1, w2, w3):
         w.set_password(password)
-    db.session.add_all([w1, w2])
+    db.session.add_all([w1, w2, w3])
     db.session.commit()
     logger.info("Seeded facilities and workers.")
 
@@ -352,15 +407,148 @@ def merge_vitals(enc, new):
     return current
 
 
-def get_owned_encounter(encounter_id):
-    """Encounters a worker may edit: the ones they created."""
+def get_facility_encounter(encounter_id):
+    """Any worker at a facility may continue that facility's encounters."""
     try:
         enc = db.session.get(Encounter, int(encounter_id)) if encounter_id else None
     except (TypeError, ValueError):
         return None
-    if enc and enc.origin_worker_id in (None, session.get("worker_id")):
-        return enc
-    return None
+    return enc if enc and enc.facility_id == session.get("facility_id") else None
+
+
+def get_facility_patient(patient_id):
+    try:
+        p = db.session.get(Patient, int(patient_id)) if patient_id else None
+    except (TypeError, ValueError):
+        return None
+    return p if p and p.facility_id == session.get("facility_id") and p.is_active else None
+
+
+def normalize_name(name):
+    """'Yusuf, Amina' and 'amina yusuf' give the same key."""
+    return " ".join(sorted(re.sub(r"[^\w\s]", " ", (name or "").lower()).split()))
+
+
+def new_encounter(patient=None, **extra):
+    enc = Encounter(
+        patient_id=patient.id if patient else None,
+        patient_name=patient.full_name if patient else extra.pop("patient_name", "Unnamed Patient"),
+        facility_id=session["facility_id"], origin_facility_id=session["facility_id"],
+        origin_worker_id=session["worker_id"], **extra,
+    )
+    db.session.add(enc)
+    return enc
+
+
+def attach_patient(enc, patient):
+    enc.patient_id = patient.id
+    enc.patient_name = patient.full_name
+
+
+def resolve_patient(data, enc=None):
+    """The patient for this request: the one sent, else the one already on the encounter."""
+    if data.get("patient_id"):
+        return get_facility_patient(data["patient_id"])
+    return enc.patient if enc and enc.patient and enc.patient.facility_id == session["facility_id"] else None
+
+
+# ---- Patient field validation ----
+def optional_phone(raw):
+    raw = (raw or "").strip()
+    if not raw:
+        return None, None
+    phone = clean_phone(raw)
+    return (phone, None) if phone else (None, "That phone number doesn't look right. Use 10 to 15 digits.")
+
+
+def hospital_id_owner(facility_id, hospital_id, exclude_id=None):
+    q = Patient.query.filter(Patient.facility_id == facility_id, Patient.is_active.is_(True),
+                             func.lower(Patient.hospital_id) == hospital_id.lower())
+    if exclude_id:
+        q = q.filter(Patient.id != exclude_id)
+    return q.first()
+
+
+def clean_patient_fields(data, facility_id, existing=None):
+    """Validate patient details. Returns (fields, error). Only keys present in `data` are returned."""
+    out = {}
+    if "full_name" in data or existing is None:
+        name = re.sub(r"\s+", " ", str(data.get("full_name") or "")).strip()
+        if len(name) < 2:
+            return None, "Enter the patient's full name."
+        out["full_name"], out["name_key"] = name[:100], normalize_name(name[:100])
+    for key in ("phone", "next_of_kin_phone"):
+        if key in data:
+            out[key], err = optional_phone(data.get(key))
+            if err:
+                return None, err
+    if "age_years" in data:
+        raw = data.get("age_years")
+        if raw in (None, ""):
+            out["age_years"] = None
+        else:
+            try:
+                age = int(raw)
+            except (TypeError, ValueError):
+                return None, "Age must be a whole number."
+            if not 0 <= age <= 120:
+                return None, "Age must be between 0 and 120."
+            out["age_years"] = age
+    if "sex" in data:
+        sex = str(data.get("sex") or "").upper()[:1]
+        out["sex"] = sex if sex in ("F", "M") else None
+    if "is_pregnant" in data:
+        v = data.get("is_pregnant")
+        out["is_pregnant"] = v if isinstance(v, bool) else None
+    for key, limit in (("village_lga", 100), ("next_of_kin_name", 100), ("allergies", 500)):
+        if key in data:
+            out[key] = str(data.get(key) or "").strip()[:limit] or None
+    if "hospital_id" in data:
+        hid = str(data.get("hospital_id") or "").strip()[:40]
+        if hid:
+            owner = hospital_id_owner(facility_id, hid, existing.id if existing else None)
+            if owner:
+                return None, f"Hospital ID {hid} already belongs to {owner.full_name}."
+        out["hospital_id"] = hid or None
+    return out, None
+
+
+def receive_referral(src):
+    """Give the receiving facility its own patient record and encounter for an incoming referral."""
+    fid = session["facility_id"]
+    local = Encounter.query.filter_by(referred_from_id=src.id, facility_id=fid).first()
+    if local:
+        return local
+
+    sp = src.patient
+    patient = None
+    if sp:
+        # Same person already registered here? (same phone and same name)
+        if sp.phone:
+            patient = Patient.query.filter_by(facility_id=fid, phone=sp.phone, name_key=sp.name_key, is_active=True).first()
+        if not patient:
+            patient = Patient(
+                facility_id=fid, full_name=sp.full_name, name_key=sp.name_key, phone=sp.phone, age_years=sp.age_years,
+                sex=sp.sex, village_lga=sp.village_lga, next_of_kin_name=sp.next_of_kin_name,
+                next_of_kin_phone=sp.next_of_kin_phone, is_pregnant=sp.is_pregnant, allergies=sp.allergies,
+                source_patient_id=sp.id, created_by_worker_id=session["worker_id"],
+            )
+            db.session.add(patient)
+            db.session.flush()
+    else:
+        patient = Patient(facility_id=fid, full_name=src.patient_name, name_key=normalize_name(src.patient_name),
+                          created_by_worker_id=session["worker_id"])
+        db.session.add(patient)
+        db.session.flush()
+
+    local = new_encounter(
+        patient, referred_from_id=src.id, statement=src.statement, translation=src.translation,
+        vitals_json=src.vitals_json, triage_tier=src.triage_tier, triage_notes=src.triage_notes,
+        diagnosis_notes=src.diagnosis_notes, diagnosis_medications=src.diagnosis_medications,
+        current_stage="triage", status="active",
+    )
+    db.session.flush()
+    return local
 
 
 def fail(message, status=500, exc=None):
@@ -554,8 +742,8 @@ def service_worker():
 @app.route("/dashboard")
 @login_required
 def dashboard():
-    worker_id, facility_id = session["worker_id"], session["facility_id"]
-    scope = db.or_(Encounter.origin_worker_id == worker_id, Encounter.destination_facility_id == facility_id)
+    facility_id = session["facility_id"]
+    scope = Encounter.facility_id == facility_id  # a center only ever sees its own patients' encounters
 
     tier = request.args.get("tier", "all").upper()
     stage = request.args.get("stage", "all").lower()
@@ -572,22 +760,23 @@ def dashboard():
     else:
         stage = "all"
     if search:
-        query = query.filter(Encounter.patient_name.ilike(f"%{search}%"))
+        like = f"%{search}%"
+        query = query.outerjoin(Patient, Encounter.patient_id == Patient.id).filter(db.or_(
+            Encounter.patient_name.ilike(like), Patient.hospital_id.ilike(like), Patient.phone.like(like)))
 
     pagination = query.order_by(Encounter.created_at.desc()).paginate(page=page, per_page=20, error_out=False)
 
     counts = dict(db.session.query(Encounter.triage_tier, func.count()).filter(scope).group_by(Encounter.triage_tier).all())
-    incoming = Encounter.query.filter_by(destination_facility_id=facility_id, referral_status="pending").count()
+    incoming_q = Encounter.query.filter_by(destination_facility_id=facility_id, referral_status="pending")
+    incoming = incoming_q.order_by(Encounter.updated_at.desc()).limit(10).all()
 
     return render_template(
         "dashboard.html",
-        pagination=pagination,
-        encounters=pagination.items,
-        current_worker_id=worker_id,
+        pagination=pagination, encounters=pagination.items, incoming=incoming,
         facility_centers={c.id: c.name for c in MedicalCenter.query.all()},
         current_tier=tier, current_stage=stage, current_search=search,
         stats={"red": counts.get("RED", 0), "yellow": counts.get("YELLOW", 0),
-               "green": counts.get("GREEN", 0), "incoming": incoming},
+               "green": counts.get("GREEN", 0), "incoming": incoming_q.count()},
     )
 
 
@@ -607,12 +796,13 @@ def get_centers():
 @login_required
 def get_encounter(encounter_id):
     """Lets triage, diagnosis and referral pages pick up where the previous stage stopped."""
-    enc = get_owned_encounter(encounter_id)
+    enc = get_facility_encounter(encounter_id)
     if not enc:
         return fail("Encounter not found.", 404)
     return jsonify({
         "id": enc.id,
         "patient_name": enc.patient_name,
+        "patient": enc.patient.to_dict() if enc.patient else None,
         "vitals": json.loads(enc.vitals_json) if enc.vitals_json else {},
         "translation": enc.translation,
         "conclusion": fromjson(enc.tc_steps_translation).get("conclusion"),
@@ -620,6 +810,78 @@ def get_encounter(encounter_id):
         "diagnosis": enc.diagnosis_notes,
         "current_stage": enc.current_stage,
     })
+
+
+@app.route("/api/encounter/<int:encounter_id>/patient", methods=["POST"])
+@login_required
+def link_encounter_patient(encounter_id):
+    """Attach an encounter (e.g. from voice intake) to a registered patient."""
+    enc = get_facility_encounter(encounter_id)
+    patient = get_facility_patient((request.get_json(silent=True) or {}).get("patient_id"))
+    if not enc or not patient:
+        return fail("Encounter or patient not found.", 404)
+    attach_patient(enc, patient)
+    db.session.commit()
+    return jsonify({"status": "linked", "patient": patient.to_dict()})
+
+
+# ---- Patient register (one register per facility) ----
+@app.route("/api/patients")
+@login_required
+def search_patients():
+    q = (request.args.get("q") or "").strip()[:60]
+    query = Patient.query.filter_by(facility_id=session["facility_id"], is_active=True)
+    tokens = normalize_name(q).split()
+    for tok in tokens:
+        like = f"%{tok}%"
+        query = query.filter(db.or_(Patient.name_key.like(like), Patient.phone.like(like),
+                                    func.lower(Patient.hospital_id).like(like)))
+    rows = query.order_by(Patient.full_name if tokens else Patient.updated_at.desc()).limit(15 if tokens else 8).all()
+    return jsonify([p.to_dict() for p in rows])
+
+
+@app.route("/api/patients", methods=["POST"])
+@login_required
+def create_patient():
+    data = request.get_json(silent=True) or {}
+    fields, err = clean_patient_fields(data, session["facility_id"])
+    if err:
+        return fail(err, 409 if "already belongs" in err else 400)
+    patient = Patient(facility_id=session["facility_id"], created_by_worker_id=session["worker_id"], **fields)
+    db.session.add(patient)
+    db.session.commit()
+    return jsonify(patient.to_dict()), 201
+
+
+@app.route("/api/patients/<int:patient_id>")
+@login_required
+def get_patient(patient_id):
+    patient = get_facility_patient(patient_id)
+    if not patient:
+        return fail("Patient not found.", 404)
+    history = (Encounter.query.filter_by(patient_id=patient.id, facility_id=session["facility_id"])
+               .order_by(Encounter.created_at.desc()).limit(20).all())
+    return jsonify({**patient.to_dict(), "encounters": [{
+        "id": e.id, "date": e.created_at.strftime("%d %b %Y, %I:%M %p"), "triage_tier": e.triage_tier,
+        "stage": e.current_stage, "diagnosis": e.diagnosis_notes, "referral_code": e.referral_code,
+    } for e in history]})
+
+
+@app.route("/api/patients/<int:patient_id>", methods=["PATCH"])
+@login_required
+def update_patient(patient_id):
+    patient = get_facility_patient(patient_id)
+    if not patient:
+        return fail("Patient not found.", 404)
+    fields, err = clean_patient_fields(request.get_json(silent=True) or {}, session["facility_id"], existing=patient)
+    if err:
+        return fail(err, 409 if "already belongs" in err else 400)
+    for key, value in fields.items():
+        setattr(patient, key, value)
+    if "full_name" in fields:  # keep the ledger's copy of the name in step
+        Encounter.query.filter_by(patient_id=patient.id).update({"patient_name": patient.full_name})
+    db.session.commit()
+    return jsonify(patient.to_dict())
 
 
 @app.route("/api/translate", methods=["POST"])
@@ -665,15 +927,14 @@ def translate_audio():
     # Stored vitals use the same keys as the triage form.
     stored = {"temp": to_float(vitals.get("temp")), "sys_bp": to_float(vitals.get("bp_sys")),
               "dia_bp": to_float(vitals.get("bp_dia")), "spo2": to_float(vitals.get("spo2"))}
-    enc = Encounter(
+    # The encounter starts unlinked; the worker confirms WHO the patient is in the next step.
+    enc = new_encounter(
         patient_name=str(data.get("patient_name") or "Unnamed Patient")[:100],
         dialect=data.get("dialect"), statement=data.get("statement"), translation=data.get("translation"),
         vitals_json=json.dumps({k: v for k, v in stored.items() if v is not None}),
         tc_steps_translation=json.dumps({"conclusion": data.get("conclusion")}),
         current_stage="translation", status="active",
-        origin_worker_id=session["worker_id"], origin_facility_id=session["facility_id"],
     )
-    db.session.add(enc)
     db.session.commit()
     data["encounter_id"] = enc.id
     data["vitals"] = vitals
@@ -710,9 +971,12 @@ def tts_instruction():
 @login_required
 def api_triage():
     data = request.get_json(silent=True) or {}
-    patient_name = (data.get("patient_name") or "").strip()[:100]
-    if not patient_name:
-        return fail("Patient name is required.", 400)
+    enc = get_facility_encounter(data.get("encounter_id")) if data.get("encounter_id") else None
+    if data.get("encounter_id") and not enc:
+        return fail("Encounter not found.", 404)
+    patient = resolve_patient(data, enc)
+    if not patient:
+        return fail("Choose or create a patient first.", 400)
 
     vitals = {k: to_float(data.get(k)) for k in VITAL_LIMITS}
     if all(v is None for v in vitals.values()):
@@ -726,23 +990,15 @@ def api_triage():
 
     tier, triggers, notes = compute_triage(vitals)
 
-    enc = None
-    if data.get("encounter_id"):
-        enc = get_owned_encounter(data["encounter_id"])
-        if not enc:
-            return fail("Encounter not found.", 404)
-    else:
-        enc = Encounter(patient_name=patient_name, origin_worker_id=session["worker_id"],
-                        origin_facility_id=session["facility_id"])
-        db.session.add(enc)
-    enc.patient_name = patient_name
+    enc = enc or new_encounter(patient)
+    attach_patient(enc, patient)
     merge_vitals(enc, vitals)
     enc.triage_tier, enc.triage_notes = tier, notes
     enc.tc_steps_triage = json.dumps({"triggers": triggers})
     advance_stage(enc, "triage")
     db.session.commit()
 
-    return jsonify({"encounter_id": enc.id,
+    return jsonify({"encounter_id": enc.id, "patient": patient.to_dict(),
                     "triage_data": {"tier": tier, "trigger": "; ".join(triggers), "notes": notes}})
 
 
@@ -753,7 +1009,7 @@ def api_diagnosis():
 
     # Step 2: the worker has chosen a diagnosis; save it.
     if "selected_diagnosis" in data:
-        enc = get_owned_encounter(data.get("encounter_id"))
+        enc = get_facility_encounter(data.get("encounter_id"))
         if not enc:
             return fail("Encounter not found.", 404)
         selected = (data.get("selected_diagnosis") or "").strip()[:500]
@@ -766,15 +1022,27 @@ def api_diagnosis():
         return jsonify({"status": "saved", "encounter_id": enc.id})
 
     # Step 1: analyse symptoms and suggest options.
-    patient_name = (data.get("patient_name") or "").strip()[:100]
+    enc = get_facility_encounter(data.get("encounter_id")) if data.get("encounter_id") else None
+    if data.get("encounter_id") and not enc:
+        return fail("Encounter not found.", 404)
+    patient = resolve_patient(data, enc)
+    if not patient:
+        return fail("Choose or create a patient first.", 400)
     symptoms = (data.get("symptoms") or "").strip()[:2000]
-    if not patient_name or not symptoms:
-        return fail("Patient name and symptoms are required.", 400)
+    if not symptoms:
+        return fail("Describe the symptoms first.", 400)
 
     vitals = {k: to_float(data.get(k)) for k in VITAL_LIMITS}
     vitals_text = ", ".join(f"{k}: {v:g}" for k, v in vitals.items() if v is not None) or "not recorded"
+    extra = []
+    if patient.age_years is not None: extra.append(f"age {patient.age_years}")
+    if patient.sex: extra.append("female" if patient.sex == "F" else "male")
+    if patient.is_pregnant: extra.append("pregnant")
+    if patient.allergies: extra.append(f"allergies: {patient.allergies}")
+    context = ("Patient: " + ", ".join(extra)) if extra else "Patient details: not recorded"
     prompt = f"""
     You are a clinical decision-support assistant for a community health worker in Nigeria.
+    {context}
     Patient symptoms: "{symptoms}"
     Vitals: {vitals_text}
     Suggest the 3 to 5 most likely diagnoses, most likely first. Consider diseases common in Nigeria (malaria, typhoid,
@@ -794,16 +1062,8 @@ def api_diagnosis():
     except Exception as e:
         return fail("Could not analyse the symptoms. Try again, or record the diagnosis yourself.", 502, e)
 
-    enc = None
-    if data.get("encounter_id"):
-        enc = get_owned_encounter(data["encounter_id"])
-        if not enc:
-            return fail("Encounter not found.", 404)
-    else:
-        enc = Encounter(patient_name=patient_name, origin_worker_id=session["worker_id"],
-                        origin_facility_id=session["facility_id"])
-        db.session.add(enc)
-    enc.patient_name = patient_name
+    enc = enc or new_encounter(patient)
+    attach_patient(enc, patient)
     enc.statement = enc.statement or symptoms
     merge_vitals(enc, vitals)
     reasoning = str(result.get("reasoning") or "")
@@ -819,34 +1079,32 @@ def api_diagnosis():
 @login_required
 def generate_referral():
     data = request.get_json(silent=True) or {}
-    patient_name = (data.get("patient_name") or "").strip()[:100]
     center_id = data.get("center_id")
     reason = (data.get("reason") or "").strip()[:1000]
-    if not patient_name or not center_id or not reason:
-        return fail("Patient name, center and reason are required.", 400)
+    enc = get_facility_encounter(data.get("encounter_id")) if data.get("encounter_id") else None
+    if data.get("encounter_id") and not enc:
+        return fail("Encounter not found.", 404)
+    patient = resolve_patient(data, enc)
+    if not patient:
+        return fail("Choose or create a patient first.", 400)
+    if not center_id or not reason:
+        return fail("Destination center and reason are required.", 400)
 
     dest = db.session.get(MedicalCenter, center_id)
     if not dest:
         return fail("Invalid medical center.", 404)
+    if dest.id == session["facility_id"]:
+        return fail("Choose a different center. You are already at this one.", 400)
 
     try:
-        if data.get("encounter_id"):
-            enc = get_owned_encounter(data["encounter_id"])
-            if not enc:
-                return fail("Encounter not found.", 404)
-        else:
-            enc = Encounter(patient_name=patient_name)
-            db.session.add(enc)
-
+        enc = enc or new_encounter(patient)
+        attach_patient(enc, patient)
         code = enc.referral_code if enc.referral_code and enc.destination_facility_id == dest.id \
             else generate_referral_code(dest.short_code)
-        enc.patient_name = patient_name
         enc.referral_reason = reason
         enc.referral_facility = dest.name
         enc.referral_code = code
         enc.referral_qr = make_qr_data_uri(code)
-        enc.origin_worker_id = session["worker_id"]
-        enc.origin_facility_id = session["facility_id"]
         enc.destination_facility_id = dest.id
         enc.referral_status = "pending"
         enc.current_stage = "referral"
@@ -857,39 +1115,48 @@ def generate_referral():
         return fail("Could not create the referral. Try again.", 500, e)
 
     return jsonify({"encounter_id": enc.id, "referral_code": code, "referral_qr": enc.referral_qr,
-                    "facility": dest.name, "patient_name": patient_name, "reason": reason})
+                    "facility": dest.name, "patient": patient.to_dict(), "patient_name": patient.full_name, "reason": reason})
 
 
 @app.route("/api/lookup", methods=["POST"])
 @login_required
 def lookup_patient():
+    """Receive a referral by code. The receiving center gets its own patient record and encounter."""
     data = request.get_json(silent=True) or {}
     code = (data.get("code") or "").strip().upper()
     if not code:
         return fail("Please enter a referral code.", 400)
 
-    enc = Encounter.query.filter_by(referral_code=code).first()
-    if not enc:
+    src = Encounter.query.filter_by(referral_code=code).first()
+    if not src:
         return fail("No patient found with this code.", 404)
-    if enc.destination_facility_id != session["facility_id"]:
+    if src.destination_facility_id != session["facility_id"]:
         return fail("Access denied: this referral is not addressed to your facility.", 403)
 
-    if enc.referral_status == "pending":
-        enc.referral_status = "fulfilled"
+    try:
+        local = receive_referral(src)
+        if src.referral_status == "pending":
+            src.referral_status = "fulfilled"
         db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return fail("Could not open this referral. Try again.", 500, e)
 
     return jsonify({
-        "patient_name": enc.patient_name,
-        "referral_code": enc.referral_code,
-        "facility": enc.referral_facility,
-        "reason": enc.referral_reason,
-        "referral_status": enc.referral_status,
-        "triage_tier": enc.triage_tier,
-        "triage_notes": enc.triage_notes,
-        "diagnosis": enc.diagnosis_notes,
-        "medications": enc.diagnosis_medications,
-        "vitals": json.loads(enc.vitals_json) if enc.vitals_json else {},
-        "created_at": enc.created_at.strftime("%Y-%m-%d %H:%M"),
+        "encounter_id": local.id,
+        "patient": local.patient.to_dict() if local.patient else None,
+        "patient_name": src.patient_name,
+        "referral_code": src.referral_code,
+        "facility": src.referral_facility,
+        "from_facility": db.session.get(MedicalCenter, src.facility_id).name if src.facility_id else None,
+        "reason": src.referral_reason,
+        "referral_status": src.referral_status,
+        "triage_tier": src.triage_tier,
+        "triage_notes": src.triage_notes,
+        "diagnosis": src.diagnosis_notes,
+        "medications": src.diagnosis_medications,
+        "vitals": json.loads(src.vitals_json) if src.vitals_json else {},
+        "created_at": src.created_at.strftime("%Y-%m-%d %H:%M"),
     })
 
 
@@ -908,9 +1175,9 @@ def patient_voice():
         return fail("Could not understand the audio. Please speak clearly.", 400, e)
 
     try:
-        patient = Patient.query.filter_by(phone_number=phone).first()
+        patient = CompanionUser.query.filter_by(phone_number=phone).first()
         if not patient:
-            patient = Patient(phone_number=phone, preferred_language="ha")
+            patient = CompanionUser(phone_number=phone, preferred_language="ha")
             db.session.add(patient)
             db.session.flush()
 
@@ -919,7 +1186,7 @@ def patient_voice():
             {"role": "user", "content": user_text},
         ], 0.3)
 
-        recent = (ChatMessage.query.filter_by(patient_id=patient.id)
+        recent = (ChatMessage.query.filter_by(user_id=patient.id)
                   .order_by(ChatMessage.created_at.desc()).limit(10).all())[::-1]
         recent_text = "\n".join(f"{m.role}: {m.translated_text or m.original_text}" for m in recent)
 
@@ -927,7 +1194,7 @@ def patient_voice():
         keywords = extract_search_keywords(translated)
         if keywords:
             memories = (MemoryIndex.query
-                        .filter(MemoryIndex.patient_id == patient.id, MemoryIndex.keywords.any(Keyword.word.in_(keywords)))
+                        .filter(MemoryIndex.user_id == patient.id, MemoryIndex.keywords.any(Keyword.word.in_(keywords)))
                         .order_by(MemoryIndex.created_at.desc()).limit(5).all())
             long_term = "\n".join(f"Past Context: {m.context_chunk}" for m in memories)
 
@@ -937,12 +1204,12 @@ def patient_voice():
         detected = str(ai.get("detected_language", "English")).lower()
 
         db.session.add_all([
-            ChatMessage(patient_id=patient.id, role="user", original_text=user_text, translated_text=translated),
-            ChatMessage(patient_id=patient.id, role="ai", original_text=answer_local, translated_text=answer_en),
+            ChatMessage(user_id=patient.id, role="user", original_text=user_text, translated_text=translated),
+            ChatMessage(user_id=patient.id, role="ai", original_text=answer_local, translated_text=answer_en),
         ])
         kws = [str(k) for k in ai.get("keywords", []) if str(k).strip()][:10]
         if kws:
-            memory = MemoryIndex(patient_id=patient.id, context_chunk=f"User: {translated}\nAI: {answer_en}")
+            memory = MemoryIndex(user_id=patient.id, context_chunk=f"User: {translated}\nAI: {answer_en}")
             memory.keywords = [get_or_create_keyword(k) for k in kws]
             db.session.add(memory)
         db.session.commit()
