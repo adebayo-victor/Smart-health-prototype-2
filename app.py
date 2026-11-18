@@ -743,7 +743,7 @@ def service_worker():
 @login_required
 def dashboard():
     facility_id = session["facility_id"]
-    scope = Encounter.facility_id == facility_id  # a center only ever sees its own patients' encounters
+    scope = Encounter.facility_id == facility_id
 
     tier = request.args.get("tier", "all").upper()
     stage = request.args.get("stage", "all").lower()
@@ -767,12 +767,23 @@ def dashboard():
     pagination = query.order_by(Encounter.created_at.desc()).paginate(page=page, per_page=20, error_out=False)
 
     counts = dict(db.session.query(Encounter.triage_tier, func.count()).filter(scope).group_by(Encounter.triage_tier).all())
+    
+    # 1. Incoming referrals directed to this facility
     incoming_q = Encounter.query.filter_by(destination_facility_id=facility_id, referral_status="pending")
-    incoming = incoming_q.order_by(Encounter.updated_at.desc()).limit(10).all()
+    incoming = incoming_q.order_by(Encounter.updated_at.desc()).limit(15).all()
+
+    # 2. Sent referrals originated by this facility
+    sent_referrals = Encounter.query.filter(
+        Encounter.facility_id == facility_id,
+        Encounter.referral_code.isnot(None)
+    ).order_by(Encounter.created_at.desc()).limit(20).all()
 
     return render_template(
         "dashboard.html",
-        pagination=pagination, encounters=pagination.items, incoming=incoming,
+        pagination=pagination, 
+        encounters=pagination.items, 
+        incoming=incoming,
+        sent_referrals=sent_referrals,
         facility_centers={c.id: c.name for c in MedicalCenter.query.all()},
         current_tier=tier, current_stage=stage, current_search=search,
         stats={"red": counts.get("RED", 0), "yellow": counts.get("YELLOW", 0),
