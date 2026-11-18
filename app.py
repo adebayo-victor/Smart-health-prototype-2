@@ -1234,8 +1234,17 @@ def lookup_patient():
     src = Encounter.query.filter_by(referral_code=code).first()
     if not src:
         return fail("No patient found with this code.", 404)
-    if src.destination_facility_id != session["facility_id"]:
-        return fail("Access denied: this referral is not addressed to your facility.", 403)
+    # For regular transfers, restrict to destination. For emergency open passes, allow any receiving hospital:
+    if src.destination_facility_id and src.destination_facility_id != session["facility_id"]:
+        if src.triage_tier == "RED" and src.referral_status == "pending":
+            # Claim this emergency patient for the current facility
+            src.destination_facility_id = session["facility_id"]
+            src.referral_facility = session.get("facility_name", src.referral_facility)
+        else:
+            return fail("Access denied: this referral is not addressed to your facility.", 403)
+    elif not src.destination_facility_id:
+        src.destination_facility_id = session["facility_id"]
+        src.referral_facility = session.get("facility_name", src.referral_facility)
 
     try:
         local = receive_referral(src)
