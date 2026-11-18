@@ -1,205 +1,219 @@
 {% extends "base.html" %}
 {% from "_macros.html" import icon %}
-{% set active = 'patient' %}
-{% block title %}Patient Companion · SmartHealth{% endblock %}
+{% set bare = true %}
+{% set main_class = 'max-w-2xl px-4 pt-0 pb-0 flex flex-col' %}
+{% block title %}Health Companion · SmartHealth{% endblock %}
 
 {% block content %}
-<div class="max-w-md mx-auto space-y-4">
-  <!-- Top Greeting & Safety Disclaimer -->
-  <div class="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm">
-    <div class="flex items-center gap-3">
-      <div class="w-10 h-10 rounded-full bg-brand-soft text-brand flex items-center justify-center font-bold">
-        {{ icon('heart', 'h-5 w-5') }}
+<div class="flex flex-col" style="height: calc(100dvh - 3.5rem - env(safe-area-inset-top, 0px))">
+
+  <!-- Entry -->
+  <section id="entryScreen" class="flex-1 flex flex-col items-center justify-center text-center py-6">
+    <div class="w-20 h-20 bg-brand rounded-2xl flex items-center justify-center mb-6 shadow-lg shadow-brand/25">{{ icon('mic', 'h-10 w-10 text-white') }}</div>
+    <h2 class="text-2xl font-black mb-2">Health Companion</h2>
+    <p class="text-slate-600 mb-8 max-w-xs">Enter your phone number to continue your private chat.</p>
+    <form id="entryForm" class="w-full max-w-sm space-y-4">
+      <label for="phoneNumber" class="sr-only">Phone number</label>
+      <input type="tel" id="phoneNumber" inputmode="tel" autocomplete="tel" placeholder="08012345678"
+             class="w-full min-h-14 px-4 rounded-xl border-2 border-slate-300 bg-white text-xl font-bold text-center tracking-widest focus:border-brand">
+      <p id="phoneError" role="alert" class="hidden text-sm font-semibold text-danger-dark"></p>
+      <button type="submit" class="w-full min-h-14 bg-ink text-white rounded-xl font-bold text-lg hover:bg-slate-800 transition shadow-lg">Start chatting</button>
+    </form>
+    <p class="text-xs text-slate-500 mt-6 max-w-xs">This is general health information, not a replacement for a clinic visit. In an emergency, go to the nearest hospital.</p>
+  </section>
+
+  <!-- Chat -->
+  <section id="chatScreen" class="hidden flex-col flex-1 min-h-0">
+    <div class="flex items-center gap-3 py-3 border-b border-slate-200">
+      <div class="w-10 h-10 bg-brand rounded-full flex items-center justify-center">{{ icon('heart', 'h-5 w-5 text-white') }}</div>
+      <div class="flex-1">
+        <h3 class="font-black leading-tight">Health Companion</h3>
+        <p class="text-xs font-semibold text-brand-dark">Always here to help</p>
       </div>
-      <div>
-        <h1 class="font-bold text-ink text-base">Health Voice Companion</h1>
-        <p class="text-xs text-slate-500">Hausa · Pidgin · English</p>
+      <button id="changeNumber" class="min-h-11 px-2 text-sm font-semibold text-slate-500 hover:text-ink">Change number</button>
+    </div>
+
+    <div id="chatMessages" class="flex-1 overflow-y-auto space-y-4 py-4 scroll-smooth" aria-live="polite">
+      <div class="flex justify-start">
+        <div class="max-w-[85%] bg-brand-soft border border-brand/20 rounded-2xl rounded-tl-none p-4 shadow-sm">
+          <p class="leading-relaxed">Sannu! I am your health companion. You can speak to me in Hausa, Pidgin, or English. How can I help you today?</p>
+        </div>
       </div>
     </div>
-    <div class="mt-3 p-2.5 rounded-xl bg-danger-soft border border-danger/20 text-xs text-danger-dark font-medium">
-      <strong>Urgent notice:</strong> If you are in immediate danger or severe pain, go straight to the hospital. You do not need an app or code to be treated.
-    </div>
-  </div>
 
-  <!-- Identification Bar -->
-  <div class="bg-white rounded-2xl border border-slate-200 p-4 space-y-2">
-    <label for="phoneNumber" class="text-xs font-bold text-slate-500 uppercase tracking-wider">Your Phone Number</label>
-    <input type="tel" id="phoneNumber" placeholder="e.g. 08012345678" value="08012345678"
-      class="w-full min-h-12 px-3.5 rounded-xl border border-slate-300 font-bold text-ink text-base">
-    <label for="patientName" class="text-xs font-bold text-slate-500 uppercase tracking-wider block mt-2">Your Name</label>
-    <input type="text" id="patientName" placeholder="e.g. Amina Yusuf"
-      class="w-full min-h-12 px-3.5 rounded-xl border border-slate-300 text-ink text-sm">
-  </div>
-
-  <!-- Dynamic Emergency Alert Banner (Hidden by default) -->
-  <div id="emergencyCard" class="hidden bg-danger-soft border-2 border-danger rounded-2xl p-4 space-y-3 animate-pulse">
-    <div class="flex items-start gap-2.5 text-danger-dark">
-      {{ icon('alert', 'h-6 w-6 flex-shrink-0 text-danger') }}
-      <div>
-        <h3 class="font-black text-sm uppercase tracking-wide">Emergency Condition Detected</h3>
-        <p id="emergencyReasonText" class="text-xs font-bold mt-0.5">Your symptoms suggest an urgent condition requiring hospital care.</p>
+    <div class="pt-3 pb-4 border-t border-slate-200">
+      <p id="statusText" class="text-center text-sm font-semibold text-slate-500 mb-3 h-5" role="status">Tap and hold to speak</p>
+      <div class="flex justify-center">
+        <button id="micButton" aria-label="Hold to speak" oncontextmenu="return false;"
+                class="mic relative w-20 h-20 rounded-full bg-ink text-white flex items-center justify-center shadow-xl transition active:scale-95 hover:bg-slate-800 select-none"
+                style="touch-action: none; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none;">
+          {{ icon('mic', 'h-8 w-8') }}
+          <span class="mic-ring absolute inset-0 rounded-full border-4 border-danger opacity-0"></span>
+        </button>
       </div>
+      <p class="text-center text-xs text-slate-500 mt-3">Keyboard users: press and hold Space</p>
     </div>
-    <p class="text-xs text-danger-dark">Would you like an immediate referral code for the hospital?</p>
-    <div class="flex gap-2">
-      <button id="acceptEmergencyBtn" class="flex-1 min-h-12 bg-danger text-white rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 hover:bg-danger-dark transition">
-        {{ icon('check', 'h-4 w-4') }} Yes, Refer Me Now
-      </button>
-      <button id="dismissEmergencyBtn" class="min-h-12 px-4 bg-white border border-danger/40 text-danger-dark rounded-xl font-bold text-xs hover:bg-slate-50 transition">
-        Dismiss
-      </button>
-    </div>
-  </div>
-
-  <!-- Generated Emergency Referral Ticket (Shown after accepting) -->
-  <div id="referralTicket" class="hidden bg-white border-2 border-brand rounded-2xl p-5 text-center space-y-3 shadow-md">
-    <span class="inline-block px-3 py-1 bg-danger-soft text-danger-dark rounded-full text-xs font-black uppercase tracking-wider">
-      Emergency Referral Active
-    </span>
-    <h3 class="font-bold text-slate-800 text-sm">Show this code at the hospital reception:</h3>
-    <div id="ticketCode" class="text-3xl font-black font-mono tracking-widest text-brand py-2 bg-brand-soft rounded-xl">
-      ------
-    </div>
-    <img id="ticketQR" src="" alt="Referral QR Code" class="mx-auto w-36 h-36 rounded-xl border border-slate-200">
-    <p id="ticketHospital" class="text-xs font-bold text-slate-700"></p>
-    <p class="text-xs text-slate-500 font-medium">Hospital staff will ingest this code immediately upon arrival.</p>
-  </div>
-
-  <!-- Conversation Area -->
-  <div id="chatHistory" class="space-y-3 min-h-[160px] pb-24">
-    <div class="p-3.5 rounded-2xl bg-white border border-slate-200 text-xs text-slate-700">
-      👋 <strong>Sannu!</strong> Yi magana a cikin Hausa, Pidgin, ko Turanci. Danna maballin don yin rikodin tambayarka.
-    </div>
-  </div>
-
-  <!-- Sticky Bottom Audio Recorder -->
-  <div class="fixed bottom-0 left-0 right-0 p-4 bg-white/95 backdrop-blur border-t border-slate-200 z-30">
-    <div class="max-w-md mx-auto">
-      <button id="voiceBtn" class="w-full min-h-14 bg-brand text-white rounded-2xl font-bold text-base flex items-center justify-center gap-2 shadow-lg hover:bg-brand-dark transition">
-        {{ icon('mic', 'h-6 w-6') }} <span id="voiceBtnText">Hold or tap to speak</span>
-      </button>
-    </div>
-  </div>
+  </section>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
 const $ = (id) => document.getElementById(id);
-const show = (id, on = true) => $(id).classList.toggle('hidden', !on);
-
 const recorder = new SH.Recorder();
-let isRecording = false;
-let currentEmergencyReason = '';
+const clips = [];
+let phone = null, busy = false, current = null;
 
-$('voiceBtn').addEventListener('click', async () => {
-  if (!isRecording) {
-    try {
-      await recorder.start();
-      isRecording = true;
-      $('voiceBtnText').textContent = 'Recording... Tap to send';
-      $('voiceBtn').className = 'w-full min-h-14 bg-danger text-white rounded-2xl font-bold text-base flex items-center justify-center gap-2 shadow-lg animate-pulse';
-    } catch (err) {
-      SH.toast(err.message, 'error');
-    }
-  } else {
-    isRecording = false;
-    $('voiceBtnText').textContent = 'Processing speech...';
-    $('voiceBtn').className = 'w-full min-h-14 bg-ink text-white rounded-2xl font-bold text-base flex items-center justify-center gap-2 shadow-lg opacity-80';
-
-    try {
-      const audio = await recorder.stop();
-      await sendVoiceMessage(audio);
-    } catch (err) {
-      SH.toast(err.message, 'error');
-    } finally {
-      $('voiceBtnText').textContent = 'Hold or tap to speak';
-      $('voiceBtn').className = 'w-full min-h-14 bg-brand text-white rounded-2xl font-bold text-base flex items-center justify-center gap-2 shadow-lg hover:bg-brand-dark transition';
-    }
+// ---- Entry ----
+function enter(number) {
+  phone = number;
+  try { sessionStorage.setItem('sh_phone', number); } catch (_) {}
+  $('entryScreen').classList.add('hidden');
+  $('chatScreen').classList.remove('hidden'); $('chatScreen').classList.add('flex');
+}
+$('entryForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const n = $('phoneNumber').value.replace(/[^\d+]/g, '');
+  if (n.replace('+', '').length < 10 || n.replace('+', '').length > 15) {
+    $('phoneError').textContent = 'Enter a valid phone number, 10 to 15 digits.';
+    return $('phoneError').classList.remove('hidden');
   }
+  enter(n);
 });
+$('changeNumber').addEventListener('click', () => {
+  try { sessionStorage.removeItem('sh_phone'); } catch (_) {}
+  location.reload();
+});
+try { const saved = sessionStorage.getItem('sh_phone'); if (saved) enter(saved); } catch (_) {}
 
-async function sendVoiceMessage(audio) {
-  const phone = $('phoneNumber').value.trim();
-  if (!phone) return SH.toast('Please provide a phone number first.', 'error');
+// ---- Hold to talk ----
+const mic = $('micButton');
+function ui(state) {
+  mic.classList.remove('recording', 'thinking');
+  const s = $('statusText');
+  s.className = 'text-center text-sm font-semibold mb-3 h-5 ' + ({ recording: 'text-danger-dark', thinking: 'text-warn-dark' }[state] || 'text-slate-500');
+  if (state === 'recording') { mic.classList.add('recording'); s.textContent = 'Listening. Release to send.'; }
+  else if (state === 'thinking') { mic.classList.add('thinking'); s.textContent = 'Thinking...'; }
+  else s.textContent = 'Tap and hold to speak';
+}
 
+async function press(e) {
+  e && e.preventDefault();
+  if (busy || recorder.active || !phone) return;
+  try { mic.setPointerCapture && e && e.pointerId != null && mic.setPointerCapture(e.pointerId); } catch (_) {}
+  ui('recording');
+  try { await recorder.start(); } catch (err) { ui('idle'); SH.toast(err.message, 'error'); }
+}
+
+async function release(e) {
+  e && e.preventDefault();
+  if (!recorder.active) return;
+  busy = true; ui('thinking');
+  const clip = await recorder.stop();
+  if (clip.blob.size < 2000) {
+    busy = false; ui('idle');
+    return SH.toast('Too short. Hold the button and speak for at least 2 seconds.', 'error');
+  }
   const form = new FormData();
+  form.append('audio', clip.blob, clip.filename);
   form.append('phone_number', phone);
-  form.append('audio', audio.blob, audio.filename);
+  try {
+    const d = await SH.api('/api/patient_voice', { form });
+    addMessage(d.user_text, 'user');
+    addMessage(d.ai_text_local, 'ai', d.audio_url);
+    if (d.audio_url) play(d.audio_url);
 
-  // Append user bubble
-  appendChatBubble('user', 'Recording sent...');
+    // If emergency detected, append prompt card in chat stream
+    if (d.emergency_alert && d.emergency_alert.is_emergency) {
+      appendEmergencyOffer(d.emergency_alert.reason || 'Urgent danger signs detected in speech.');
+    }
+  } catch (err) {
+    addMessage(err.message || "I'm sorry, I didn't catch that. Please try again.", 'ai');
+  } finally { busy = false; ui('idle'); }
+}
+
+mic.addEventListener('pointerdown', press);
+mic.addEventListener('pointerup', release);
+mic.addEventListener('pointercancel', release);
+mic.addEventListener('keydown', (e) => { if (e.code === 'Space' && !e.repeat) press(e); });
+mic.addEventListener('keyup', (e) => { if (e.code === 'Space') release(e); });
+
+// ---- Messages ----
+function addMessage(text, role, audioUrl) {
+  const user = role === 'user';
+  let replay = '';
+  if (!user && audioUrl) {
+    clips.push(audioUrl);
+    replay = `<button data-clip="${clips.length - 1}" class="replay mt-2 flex items-center gap-1.5 min-h-10 text-sm font-bold text-brand-dark hover:text-brand">
+      {{ icon('speaker', 'h-4 w-4') | replace('\n', '') }} Replay</button>`;
+  }
+  $('chatMessages').insertAdjacentHTML('beforeend', `
+    <div class="flex ${user ? 'justify-end' : 'justify-start'}">
+      <div class="max-w-[85%] rounded-2xl p-4 shadow-sm ${user ? 'bg-ink text-white rounded-tr-none' : 'bg-brand-soft border border-brand/20 rounded-tl-none'}">
+        <p class="leading-relaxed whitespace-pre-line">${SH.esc(text)}</p>${replay}
+      </div>
+    </div>`);
+  $('chatMessages').scrollTop = $('chatMessages').scrollHeight;
+}
+
+$('chatMessages').addEventListener('click', (e) => {
+  const b = e.target.closest('.replay');
+  if (b) play(clips[+b.dataset.clip]);
+});
+
+function play(url) {
+  if (current) current.pause();
+  current = new Audio(url);
+  current.play().catch(() => SH.toast('Tap Replay to hear the answer.', 'info'));
+}
+
+// ---- In-Stream Emergency Referral ----
+function appendEmergencyOffer(reason) {
+  const cardId = 'em_' + Date.now();
+  $('chatMessages').insertAdjacentHTML('beforeend', `
+    <div id="${cardId}" class="flex justify-start">
+      <div class="max-w-[85%] rounded-2xl rounded-tl-none p-4 bg-danger-soft border-2 border-danger text-danger-dark space-y-2 shadow-sm">
+        <p class="text-xs font-black uppercase tracking-wide">⚠️ Emergency Condition Detected</p>
+        <p class="text-xs leading-relaxed font-semibold">${SH.esc(reason)}</p>
+        <p class="text-xs font-bold text-ink pt-1">Would you like an immediate referral code for the hospital?</p>
+        <div class="pt-1 flex gap-2">
+          <button onclick="acceptReferral('${cardId}', '${encodeURIComponent(reason)}')" class="min-h-11 px-4 bg-danger text-white rounded-xl font-bold text-xs hover:bg-danger-dark transition">
+            Yes, give me a code
+          </button>
+        </div>
+        <p class="text-[10px] text-danger-dark/80 pt-1 border-t border-danger/20 font-medium">
+          If life-threatening, go straight to the nearest hospital. You do not need a code to receive care.
+        </p>
+      </div>
+    </div>`);
+  $('chatMessages').scrollTop = $('chatMessages').scrollHeight;
+}
+
+window.acceptReferral = async function(cardId, encodedReason) {
+  const card = $(cardId);
+  const reason = decodeURIComponent(encodedReason);
+  if (card) card.remove();
 
   try {
-    const data = await SH.api('/api/patient_voice', { form });
+    const data = await SH.api('/api/patient_emergency_referral', {
+      json: { phone_number: phone, reason: reason }
+    });
 
-    // Update with transcribed text and reply
-    updateLastUserBubble(data.user_text);
-    appendChatBubble('ai', data.ai_text_local);
-
-    // Play response audio
-    if (data.audio_url) {
-      new Audio(data.audio_url).play();
-    }
-
-    // Check for emergency alert
-    if (data.emergency_alert && data.emergency_alert.is_emergency) {
-      currentEmergencyReason = data.emergency_alert.reason || 'Urgent symptom detected';
-      $('emergencyReasonText').textContent = currentEmergencyReason;
-      show('emergencyCard', true);
-      $('emergencyCard').scrollIntoView({ behavior: 'smooth', block: 'center' });
-    }
+    $('chatMessages').insertAdjacentHTML('beforeend', `
+      <div class="flex justify-start">
+        <div class="max-w-[85%] rounded-2xl rounded-tl-none p-4 bg-white border-2 border-brand text-ink text-center space-y-2 shadow-sm">
+          <span class="inline-block px-2.5 py-0.5 rounded-full bg-danger-soft text-danger-dark text-[11px] font-bold uppercase">Emergency Referral</span>
+          <p class="text-xs font-bold text-slate-600">Show this code at the hospital reception:</p>
+          <div class="text-2xl font-mono font-black text-brand tracking-widest bg-brand-soft py-1.5 rounded-xl">${SH.esc(data.referral_code)}</div>
+          <img src="${data.referral_qr}" alt="Referral QR" class="mx-auto w-32 h-32 rounded-lg border border-slate-200">
+          <p class="text-xs font-bold text-slate-700">${SH.esc(data.hospital_name)}</p>
+          <p class="text-[11px] text-slate-500">Hospital staff can ingest this code immediately upon your arrival.</p>
+        </div>
+      </div>`);
+    $('chatMessages').scrollTop = $('chatMessages').scrollHeight;
   } catch (err) {
     SH.toast(err.message, 'error');
   }
-}
-
-function appendChatBubble(role, text) {
-  const isUser = role === 'user';
-  const div = document.createElement('div');
-  div.className = `p-3.5 rounded-2xl text-xs font-medium max-w-[85%] ${
-    isUser ? 'ml-auto bg-ink text-white rounded-br-none user-bubble' : 'mr-auto bg-slate-100 text-ink rounded-bl-none'
-  }`;
-  div.textContent = text;
-  $('chatHistory').appendChild(div);
-  div.scrollIntoView({ behavior: 'smooth' });
-}
-
-function updateLastUserBubble(text) {
-  const bubbles = document.querySelectorAll('.user-bubble');
-  if (bubbles.length) {
-    bubbles[bubbles.length - 1].textContent = `“${text}”`;
-  }
-}
-
-$('dismissEmergencyBtn').addEventListener('click', () => {
-  show('emergencyCard', false);
-});
-
-$('acceptEmergencyBtn').addEventListener('click', async (e) => {
-  const phone = $('phoneNumber').value.trim();
-  const name = $('patientName').value.trim() || 'Emergency Patient';
-
-  try {
-    const resp = await SH.busy(e.currentTarget, 'Generating referral', () =>
-      SH.api('/api/patient_emergency_referral', {
-        json: {
-          phone_number: phone,
-          full_name: name,
-          reason: currentEmergencyReason
-        }
-      })
-    );
-
-    show('emergencyCard', false);
-    $('ticketCode').textContent = resp.referral_code;
-    $('ticketQR').src = resp.referral_qr;
-    $('ticketHospital').textContent = `Referred to: ${resp.hospital_name}`;
-    show('referralTicket', true);
-    $('referralTicket').scrollIntoView({ behavior: 'smooth', block: 'center' });
-  } catch (err) {
-    SH.toast(err.message, 'error');
-  }
-});
+};
 </script>
 {% endblock %}
