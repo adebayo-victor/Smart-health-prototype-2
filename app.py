@@ -1470,6 +1470,112 @@ def patient_emergency_referral():
         db.session.rollback()
         return fail("Could not generate emergency referral. Please go directly to the hospital.", 500, e)
 
+@app.route("/api/centers/search_location", methods=["POST"])
+def search_centers_location():
+    """Searches medical centers matching patient's location keywords."""
+    data = request.get_json(silent=True) or {}
+    query = (data.get("location") or "").strip()
+    
+    tokens = [t.lower() for t in re.sub(r"[^\w\s]", " ", query).split() if len(t) > 2]
+    all_centers = MedicalCenter.query.all()
+    
+    matched = []
+    if tokens:
+        for c in all_centers:
+            corpus = f"{c.name} {c.location or ''}".lower()
+            if any(t in corpus for t in tokens):
+                matched.append(c)
+
+    # If no specific keyword matched, return all available centers in the database
+    if not matched:
+        matched = all_centers[:4]
+
+    return jsonify([
+        {"id": c.id, "name": c.name, "location": c.location, "short_code": c.short_code}
+        for c in matched
+    ])
+
+
+@app.route("/api/patient_emergency_referral", methods=["POST"])
+def patient_emergency_referral():
+    """Generates an emergency open pass valid across multiple nearby hospitals."""
+    data = request.get_json(silent=True) or {}
+    phone = clean_phone(data.get("phone_number"))
+    name = (data.get("full_name") or "").strip()[:100] or "Emergency Patient"
+    reason = (data.get("reason") or "Emergency referral via Voice Companion").strip()[:500]
+    hospital_names = data.get("hospital_names") or []
+    
+    if not phone:
+        return fail("Valid phone number required.", 400)
+
+    # Use first center's code prefix, or 'EMG'
+    center_code = "EMG"
+    first_center_id = None
+    if hospital_names:
+        c = MedicalCenter.query.filter(MedicalCenter.name == hospital_names[0]).first()
+        if c:
+            center_code = c.short_code
+            first_center_id = c.id
+
+    try:
+        code = generate_referral_code(center_code)
+        qr_uri = make_qr_data_uri(code)
+        facilities_summary = "; ".join(hospital_names) if hospital_names else "Any registered facility"
+
+        enc = Encounter(
+            facility_id=first_center_id or 1,
+            origin_facility_id=first_center_id,
+            destination_facility_id=first_center_id, # Any hospital can claim this on arrival
+            patient_name=name,
+            dialect="Hausa/Pidgin",
+            statement=reason,
+            translation=reason,
+            triage_tier="RED",
+            triage_notes="Emergency Open Pass. Valid at all matched centers.",
+            referral_facility=facilities_summary,
+            referral_code=code,
+            referral_qr=qr_uri,
+            referral_reason=reason,
+            referral_status="pending",
+            current_stage="referral",
+            status="active",
+            created_at=utcnow(),
+            updated_at=utcnow()
+        )
+        db.session.add(enc)
+        db.session.commit()
+
+        return jsonify({
+            "success": True,
+            "referral_code": code,
+            "referral_qr": qr_uri,
+            "hospital_names": hospital_names,
+            "patient_name": name,
+            "reason": reason
+        })
+    except Exception as e:
+        db.session.rollback()
+        return fail("Could not generate emergency referral.", 500, e)
+
+
+@app.route("/api/patient_referral_status", methods=["GET"])
+def patient_referral_status():
+    """Checks whether an emergency code is still pending or has been used."""
+    code = (request.args.get("code") or "").strip().upper()
+    if not code:
+        return jsonify({"active": False})
+
+    enc = Encounter.query.filter_by(referral_code=code).first()
+    if not enc:
+        return jsonify({"active": False})
+
+    return jsonify({
+        "active": enc.referral_status == "pending",
+        "referral_code": enc.referral_code,
+        "referral_qr": enc.referral_qr,
+        "status": enc.referral_status,
+        "hospital_name": enc.referral_facility
+    })
 
 if __name__ == "__main__":
     app.run(debug=DEBUG, port=int(os.getenv("PORT", 5000)))
