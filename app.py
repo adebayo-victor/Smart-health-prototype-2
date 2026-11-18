@@ -1321,8 +1321,33 @@ def patient_voice():
         db.session.rollback()
         return fail("Something went wrong. Please try again.", 500, e)
 
-    return jsonify({"user_text": user_text, "ai_text_local": answer_local,
-                    "audio_url": speak(answer_local, "ha" if "haus" in detected else "en")})
+    # In @app.route("/api/patient_voice", methods=["POST"])
+    # Replace the return line at the end of the function with:
+    return jsonify({
+        "user_text": user_text,
+        "ai_text_local": answer_local,
+        "audio_url": speak(answer_local, "ha" if "haus" in detected else "en"),
+        "emergency_alert": {
+            "is_emergency": bool(ai.get("is_emergency")),
+            "reason": ai.get("emergency_reason")
+        }
+    })
+
+# ==========================================
+# EMERGENCY DETECTION & AUTO-REFERRAL
+# ==========================================
+
+EMERGENCY_PATTERNS = re.compile(
+    r"\b("
+    # Hausa emergency triggers
+    r"ruwa ya zuba|jini yana zuba|jini na fita|farfadiya|numfashi da kyar|zawo mai tsanani|"
+    # Pidgin emergency triggers
+    r"water don break|blood de rush|blood dey rush|pikin de shake|breath no de catch|belly de pain well well|"
+    # English emergency triggers
+    r"water broke|water break|heavy bleeding|bleeding heavily|convulsion|convulsing|cannot breathe|can't breathe|unconscious"
+    r")\b",
+    re.IGNORECASE
+)
 
 
 def answer_patient(user_text, translated_text, past_memories, recent_chat):
@@ -1344,23 +1369,97 @@ def answer_patient(user_text, translated_text, past_memories, recent_chat):
     "{user_text}"
 
     INSTRUCTIONS:
-    1. Detect the language of the ORIGINAL QUESTION (it will be Hausa, Nigerian Pidgin, or English).
+    1. Detect the language of the ORIGINAL QUESTION (Hausa, Nigerian Pidgin, or English).
     2. Formulate your medical answer in THAT EXACT SAME DETECTED LANGUAGE.
+    3. Evaluate if the patient is experiencing an EMERGENCY (e.g. water broke/labor, severe bleeding, convulsions, severe breathing difficulty, high fever in baby).
 
-    Return ONLY valid JSON in this exact format:
+    Return ONLY valid JSON:
     {{
       "answer_english": "The medical answer in simple English (for our records).",
       "answer_local": "Your medical answer in the DETECTED language (Hausa, Pidgin, or English).",
       "detected_language": "Hausa" or "Pidgin" or "English",
-      "keywords": ["word1", "word2", "number3"]
+      "keywords": ["word1", "word2"],
+      "is_emergency": true or false,
+      "emergency_reason": "One short sentence why this is an emergency (or null if not)"
     }}
     """
     try:
-        return llm_json(prompt, 0.3)
+        res = llm_json(prompt, 0.2)
     except Exception:
         logger.exception("Patient answer failed")
-        return {"answer_english": "Error", "answer_local": "Na sami matsala, gwada sake.",
-                "detected_language": "Hausa", "keywords": []}
+        res = {
+            "answer_english": "Please visit the nearest health clinic to have this checked.",
+            "answer_local": "Don Allah je asibiti mafi kusa don a duba lafiyarka.",
+            "detected_language": "Hausa",
+            "keywords": [],
+            "is_emergency": False,
+            "emergency_reason": None
+        }
+
+    # Deterministic keyword safety net: can escalate, never downgrade
+    text_corpus = f"{user_text} {translated_text}"
+    if EMERGENCY_PATTERNS.search(text_corpus):
+        res["is_emergency"] = True
+        if not res.get("emergency_reason"):
+            res["emergency_reason"] = "Urgent clinical danger signs detected in speech."
+
+    return res
+
+
+@app.route("/api/patient_emergency_referral", methods=["POST"])
+def patient_emergency_referral():
+    """Generates an instant emergency hospital referral code for a patient."""
+    data = request.get_json(silent=True) or {}
+    phone = clean_phone(data.get("phone_number"))
+    name = (data.get("full_name") or "").strip()[:100] or "Emergency Patient"
+    reason = (data.get("reason") or "Emergency referral from AI Voice Companion").strip()[:500]
+
+    if not phone:
+        return fail("Valid phone number required.", 400)
+
+    # Pick the first available hospital (or default to Murtala Muhammed Specialist Hospital)
+    hospital = MedicalCenter.query.filter_by(short_code="MU").first() or MedicalCenter.query.first()
+    if not hospital:
+        return fail("No receiving facility available.", 500)
+
+    try:
+        code = generate_referral_code(hospital.short_code)
+        qr_uri = make_qr_data_uri(code)
+
+        enc = Encounter(
+            facility_id=hospital.id,
+            origin_facility_id=hospital.id,
+            destination_facility_id=hospital.id,
+            patient_name=name,
+            dialect="Hausa",
+            statement=reason,
+            translation=reason,
+            triage_tier="RED",
+            triage_notes="Emergency self-referral triggered via voice companion.",
+            referral_facility=hospital.name,
+            referral_code=code,
+            referral_qr=qr_uri,
+            referral_reason=reason,
+            referral_status="pending",
+            current_stage="referral",
+            status="active",
+            created_at=utcnow(),
+            updated_at=utcnow()
+        )
+        db.session.add(enc)
+        db.session.commit()
+
+        return jsonify({
+            "success": True,
+            "referral_code": code,
+            "referral_qr": qr_uri,
+            "hospital_name": hospital.name,
+            "patient_name": name,
+            "reason": reason
+        })
+    except Exception as e:
+        db.session.rollback()
+        return fail("Could not generate emergency referral. Please go directly to the hospital.", 500, e)
 
 
 if __name__ == "__main__":
