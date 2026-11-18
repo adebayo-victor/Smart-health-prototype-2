@@ -1,75 +1,125 @@
 {% extends "base.html" %}
-{% from "_macros.html" import icon, vitals_grid %}
+{% from "_macros.html" import icon, page_header %}
 {% set active = 'diagnosis' %}
-{% block title %}Systemic footprint diagnosis · SmartHealth{% endblock %}
+{% block title %}Clinical diagnosis · SmartHealth{% endblock %}
 
 {% block content %}
-<div class="flex items-center gap-3 mb-6">
-  <button id="backBtn" aria-label="Go back" class="w-11 h-11 -ml-2 flex items-center justify-center text-slate-500 hover:bg-slate-200/60 rounded-full transition">{{ icon('back', 'h-6 w-6') }}</button>
-  <div>
-    <h1 class="text-xl font-black leading-tight">Systemic footprint diagnosis</h1>
-    <p class="text-sm text-slate-500">The AI suggests. You decide.</p>
+{{ page_header('Clinical diagnosis', '/dashboard', 'Review symptoms and vitals, select or type a diagnosis, and play instructions for the patient.') }}
+
+<!-- Step 1: Patient Selection & Clinical Input -->
+<div class="space-y-6">
+  <div class="bg-white rounded-2xl border border-slate-200 p-4 space-y-3">
+    <h2 class="text-sm font-bold text-slate-500">1. Patient</h2>
+    <div id="patientPicker"></div>
+  </div>
+
+  <div class="bg-white rounded-2xl border border-slate-200 p-4 space-y-4">
+    <h2 class="text-sm font-bold text-slate-500">2. Symptoms & Clinical Notes</h2>
+    <label for="symptomsInput" class="sr-only">Symptoms description</label>
+    <textarea id="symptomsInput" rows="3" placeholder="Describe symptoms, duration, and patient complaints..."
+      class="w-full p-3.5 rounded-xl border border-slate-300 bg-white text-base text-ink focus:border-brand focus:ring-1 focus:ring-brand"></textarea>
+
+    <div>
+      <p class="text-xs font-bold text-slate-400 mb-2 uppercase tracking-wider">Vitals (Optional / Pre-filled)</p>
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-sm">
+        <div>
+          <label for="tempInput" class="text-xs text-slate-500">Temp (°C)</label>
+          <input type="number" step="0.1" id="tempInput" placeholder="37.0" class="w-full min-h-11 px-3 rounded-xl border border-slate-300">
+        </div>
+        <div>
+          <label for="sysInput" class="text-xs text-slate-500">Systolic BP</label>
+          <input type="number" id="sysInput" placeholder="120" class="w-full min-h-11 px-3 rounded-xl border border-slate-300">
+        </div>
+        <div>
+          <label for="diaInput" class="text-xs text-slate-500">Diastolic BP</label>
+          <input type="number" id="diaInput" placeholder="80" class="w-full min-h-11 px-3 rounded-xl border border-slate-300">
+        </div>
+        <div>
+          <label for="spo2Input" class="text-xs text-slate-500">SpO2 (%)</label>
+          <input type="number" id="spo2Input" placeholder="98" class="w-full min-h-11 px-3 rounded-xl border border-slate-300">
+        </div>
+      </div>
+    </div>
+
+    <button id="analyzeBtn" class="w-full min-h-14 bg-brand text-white rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-brand-dark transition">
+      {{ icon('sparkles', 'h-5 w-5') }} Analyze symptoms with AI
+    </button>
   </div>
 </div>
 
-<!-- Input -->
-<div id="patientPicker" class="mb-4"></div>
-<div class="bg-white p-4 rounded-xl border border-slate-200 mb-4">
-  <div>
-    <label for="symptoms" class="text-sm font-semibold text-slate-600 block mb-1">Symptoms or chief complaint *</label>
-    <textarea id="symptoms" rows="3" maxlength="2000" placeholder="e.g. High fever for 3 days, yellowing of eyes"
-              class="w-full px-3 py-2 rounded-lg border border-slate-300 bg-surface text-base"></textarea>
+<!-- Step 2: Diagnostic Options + Custom Input -->
+<div id="resultsArea" class="hidden mt-6 space-y-6">
+  <div class="bg-surface rounded-2xl border border-brand/30 p-4 space-y-4">
+    <div class="flex items-center justify-between pb-2 border-b border-brand/20">
+      <h3 class="text-sm font-bold text-brand-dark flex items-center gap-2">
+        {{ icon('check', 'h-5 w-5') }} Diagnostic Assessment
+      </h3>
+      <span id="sourceRef" class="text-xs font-semibold px-2 py-0.5 rounded-full bg-brand-soft text-brand-dark">Clinical STG</span>
+    </div>
+
+    <p id="reasoningText" class="text-sm text-ink leading-relaxed"></p>
+
+    <div>
+      <p class="text-xs font-bold text-slate-500 mb-2 uppercase tracking-wider">Select the verified diagnosis:</p>
+      <div id="optionsList" class="space-y-2"></div>
+
+      <!-- Custom Diagnosis Input (When AI options are incorrect) -->
+      <div class="mt-3 pt-3 border-t border-slate-200">
+        <label class="flex items-start gap-3 p-3 rounded-xl border border-slate-200 hover:border-brand cursor-pointer transition bg-white">
+          <input type="radio" name="diagnosisOption" value="__custom__" id="radioCustom" class="mt-1 w-5 h-5 accent-brand">
+          <div class="flex-1 min-w-0">
+            <span class="font-bold text-sm text-ink block mb-1">Other / Input Custom Diagnosis</span>
+            <input type="text" id="customDiagnosisInput" placeholder="Type your diagnosis here if AI options are incorrect..."
+              class="w-full min-h-11 px-3.5 rounded-xl border border-slate-300 text-sm bg-white focus:border-brand focus:ring-1 focus:ring-brand" disabled>
+          </div>
+        </label>
+      </div>
+    </div>
+
+    <div>
+      <label for="medicationsInput" class="text-xs font-bold text-slate-500 uppercase tracking-wider block mb-1">Prescribed Medications & Plan</label>
+      <textarea id="medicationsInput" rows="2" placeholder="e.g. Paracetamol 500mg TDS for 3 days, Artemether-Lumefantrine..."
+        class="w-full p-3 rounded-xl border border-slate-300 text-sm bg-white"></textarea>
+    </div>
+
+    <button id="saveDiagnosisBtn" class="w-full min-h-14 bg-ink text-white rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-slate-800 transition">
+      {{ icon('check', 'h-5 w-5') }} Save confirmed diagnosis
+    </button>
   </div>
-</div>
-<div class="mb-6">{{ vitals_grid() }}</div>
 
-<button id="analyzeBtn" class="w-full min-h-14 bg-ink text-white rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-slate-800 transition mb-6">
-  Analyze symptoms
-</button>
+  <!-- Step 3: Patient Instructions Audio Readout Bar -->
+  <div id="instructionBarArea" class="hidden bg-white rounded-2xl border-2 border-info/40 p-4 space-y-4">
+    <div class="flex items-center justify-between pb-2 border-b border-slate-100">
+      <h3 class="font-bold text-ink text-sm flex items-center gap-2">
+        {{ icon('speaker', 'h-5 w-5 text-info') }} Play Instructions in Patient's Language
+      </h3>
+      <span class="text-xs font-semibold px-2 py-0.5 rounded-full bg-info/10 text-info">Audio Readout</span>
+    </div>
 
-<!-- Results -->
-<section id="selectionArea" class="hidden space-y-4" aria-live="polite">
-  <div class="bg-info-soft p-4 rounded-xl border border-sky-200">
-    <p class="text-sm font-bold text-sky-800 mb-1">AI clinical reasoning</p>
-    <p id="aiReasoning" class="text-sm text-sky-950 leading-relaxed"></p>
-    <p id="aiSource" class="hidden mt-3 text-xs font-bold text-sky-800 bg-sky-100 px-2 py-1 rounded inline-block"></p>
-  </div>
+    <div>
+      <label for="instructionText" class="text-xs text-slate-500 block mb-1">What should the patient do? (Medications, rest, fluids, warning signs)</label>
+      <textarea id="instructionText" rows="2" class="w-full p-3 rounded-xl border border-slate-300 text-sm text-ink"></textarea>
+    </div>
 
-  <fieldset>
-    <legend class="text-sm font-bold text-slate-500 mb-2">Select the correct diagnosis</legend>
-    <div id="optionsContainer" class="space-y-2"></div>
-  </fieldset>
+    <div class="flex gap-2">
+      <select id="instructionLang" class="min-h-12 px-3 rounded-xl border border-slate-300 bg-white text-sm font-semibold">
+        <option value="ha" selected>Hausa</option>
+        <option value="pcm">Nigerian Pidgin</option>
+        <option value="en">English</option>
+      </select>
+      <button id="playInstructionBtn" class="flex-1 min-h-12 bg-info text-white rounded-xl font-bold flex items-center justify-center gap-2 hover:opacity-90 transition">
+        {{ icon('speaker', 'h-5 w-5') }} <span>Play to patient</span>
+      </button>
+    </div>
 
-  <div>
-    <label for="medications" class="text-sm font-semibold text-slate-600 block mb-1">Medication given or prescribed (optional)</label>
-    <input type="text" id="medications" maxlength="1000" placeholder="e.g. Artemether-lumefantrine, 3 days"
-           class="w-full min-h-12 px-3 rounded-lg border border-slate-300 bg-white text-base">
-  </div>
-
-  <p class="text-xs text-slate-500">This is decision support, not a diagnosis. Confirm against your clinical judgement and local guidelines.</p>
-  <p id="saveHint" class="text-center text-sm font-semibold text-slate-500">Select a diagnosis to enable saving</p>
-  <button id="saveBtn" disabled class="w-full min-h-14 rounded-xl font-bold bg-brand text-white hover:bg-brand-dark transition disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed">
-    Save diagnosis
-  </button>
-</section>
-
-<!-- Success -->
-<section id="successMessage" class="hidden p-5 bg-brand-soft border-2 border-brand rounded-xl text-center">
-  <p class="text-brand-dark font-bold mb-3">Diagnosis saved.</p>
-  <div class="grid grid-cols-2 gap-2">
-    <a id="goReferral" href="/referral" class="min-h-12 bg-ink text-white rounded-xl font-bold flex items-center justify-center">Refer patient</a>
-    <a href="/dashboard" class="min-h-12 bg-white border border-slate-300 rounded-xl font-bold flex items-center justify-center">Back to ledger</a>
-  </div>
-</section>
-
-<!-- Unsaved modal -->
-<div id="unsavedModal" class="hidden fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
-  <div class="bg-white rounded-2xl p-6 max-w-sm w-full shadow-2xl">
-    <h3 id="modalTitle" class="text-lg font-black mb-2">No diagnosis selected</h3>
-    <p class="text-sm text-slate-600 mb-6">Save this case as <b>Undiagnosed</b> and leave, or keep working?</p>
-    <div class="flex gap-3">
-      <button id="modalCancel" class="flex-1 min-h-12 bg-slate-200 rounded-xl font-bold hover:bg-slate-300 transition">Keep working</button>
-      <button id="modalSave" class="flex-1 min-h-12 bg-warn text-white rounded-xl font-bold hover:bg-warn-dark transition">Save and exit</button>
+    <!-- Navigation Next Steps -->
+    <div class="pt-3 border-t border-slate-100 flex gap-2">
+      <a id="goReferralBtn" href="/referral" class="flex-1 min-h-12 bg-danger text-white rounded-xl font-bold flex items-center justify-center text-sm hover:bg-danger-dark transition">
+        Refer to Hospital
+      </a>
+      <a href="/dashboard" class="flex-1 min-h-12 bg-slate-200 text-ink rounded-xl font-bold flex items-center justify-center text-sm hover:bg-slate-300 transition">
+        Return to Ledger
+      </a>
     </div>
   </div>
 </div>
@@ -78,92 +128,164 @@
 {% block scripts %}
 <script>
 const $ = (id) => document.getElementById(id);
-const VITALS = ['temp', 'hr', 'sys_bp', 'dia_bp', 'spo2'];
-let encounterId = new URLSearchParams(location.search).get('encounter_id');
-let selected = null, analysed = false, saved = false;
+const show = (id, on = true) => $(id).classList.toggle('hidden', !on);
+
 const picker = new SH.PatientPicker($('patientPicker'));
+let encounterId = null;
 
-// Pick up where triage or intake stopped.
-if (encounterId) {
-  SH.api(`/api/encounter/${encodeURIComponent(encounterId)}`, { method: 'GET' }).then((e) => {
-    if (e.patient) picker.setPatient(e.patient); else picker.suggest(e.patient_name);
-    $('symptoms').value = e.conclusion || e.translation || '';
-    VITALS.forEach((k) => { if (e.vitals && e.vitals[k] != null) $(k).value = e.vitals[k]; });
-  }).catch(() => { encounterId = null; });
-}
+// Preload encounter if passed in URL
+(async function init() {
+  const params = new URLSearchParams(window.location.search);
+  const pId = params.get('patient_id');
+  const eId = params.get('encounter_id');
 
+  if (pId) {
+    try {
+      const p = await SH.api(`/api/patients/${encodeURIComponent(pId)}`);
+      picker.setPatient(p);
+    } catch (_) {}
+  }
+  if (eId) {
+    encounterId = eId;
+    try {
+      const enc = await SH.api(`/api/encounter/${encodeURIComponent(eId)}`);
+      if (enc.vitals) {
+        if (enc.vitals.temp) $('tempInput').value = enc.vitals.temp;
+        if (enc.vitals.bp_sys) $('sysInput').value = enc.vitals.bp_sys;
+        if (enc.vitals.bp_dia) $('diaInput').value = enc.vitals.bp_dia;
+        if (enc.vitals.spo2) $('spo2Input').value = enc.vitals.spo2;
+      }
+      if (enc.statement && !$('symptomsInput').value) {
+        $('symptomsInput').value = enc.statement;
+      }
+    } catch (_) {}
+  }
+})();
+
+// Analyze Symptoms
 $('analyzeBtn').addEventListener('click', async (e) => {
-  const patient = picker.value, symptoms = $('symptoms').value.trim();
-  if (!patient) return picker.require();
-  if (!symptoms) return SH.toast('Describe the symptoms first.', 'error');
-  const json = { patient_id: patient.id, symptoms, encounter_id: encounterId };
-  VITALS.forEach((k) => { json[k] = $(k).value === '' ? null : parseFloat($(k).value); });
+  const patient = picker.value;
+  if (!patient || !patient.id) return picker.require();
+
+  const symptoms = $('symptomsInput').value.trim();
+  if (!symptoms) return SH.toast('Please describe the symptoms first.', 'error');
+
+  const vitals = {
+    temp: $('tempInput').value,
+    sys_bp: $('sysInput').value,
+    dia_bp: $('diaInput').value,
+    spo2: $('spo2Input').value
+  };
 
   try {
-    const data = await SH.busy(e.currentTarget, 'Running systemic footprint analysis', () => SH.api('/api/diagnosis', { json }));
+    const data = await SH.busy(e.currentTarget, 'Analyzing symptoms', () =>
+      SH.api('/api/diagnosis', {
+        json: {
+          patient_id: patient.id,
+          encounter_id: encounterId,
+          symptoms,
+          ...vitals
+        }
+      })
+    );
+
     encounterId = data.encounter_id;
-    analysed = true;
-    render(data.options, data.reasoning, data.source_reference);
-  } catch (err) { SH.toast(err.message, 'error'); }
+    renderOptions(data);
+  } catch (err) {
+    SH.toast(err.message, 'error');
+  }
 });
 
-function render(options, reasoning, source) {
-  $('aiReasoning').textContent = reasoning;
-  const src = $('aiSource');
-  src.classList.toggle('hidden', !source || source === 'Unknown');
-  src.textContent = 'Source: ' + source;
+function renderOptions(data) {
+  $('reasoningText').textContent = data.reasoning || 'Diagnostic assessment based on symptoms and vitals.';
+  $('sourceRef').textContent = data.source_reference || 'Clinical STG';
 
-  selected = null; setReady(null);
-  $('optionsContainer').innerHTML = options.map((o, i) => `
-    <label class="option flex items-center gap-3 p-4 min-h-14 bg-white rounded-xl border-2 border-slate-200 cursor-pointer hover:bg-slate-50 transition">
-      <input type="radio" name="dx" value="${i}" class="w-5 h-5 accent-emerald-600">
-      <span class="font-bold">${SH.esc(o)}</span>
-    </label>`).join('');
-  $('optionsContainer').querySelectorAll('input').forEach((r) => r.addEventListener('change', () => {
-    selected = options[+r.value];
-    $('optionsContainer').querySelectorAll('.option').forEach((l) => {
-      const on = l.contains(r) && r.checked;
-      l.classList.toggle('border-brand', on); l.classList.toggle('bg-brand-soft', on);
-      l.classList.toggle('border-slate-200', !on);
+  const list = data.options || [];
+  $('optionsList').innerHTML = list.map((opt, i) => `
+    <label class="flex items-center gap-3 p-3 rounded-xl border border-slate-200 hover:border-brand cursor-pointer transition bg-white">
+      <input type="radio" name="diagnosisOption" value="${SH.esc(opt)}" ${i === 0 ? 'checked' : ''} class="w-5 h-5 accent-brand">
+      <span class="text-sm font-bold text-ink">${SH.esc(opt)}</span>
+    </label>
+  `).join('');
+
+  // Handle radio toggle between AI options and Custom Input
+  document.querySelectorAll('input[name="diagnosisOption"]').forEach(r => {
+    r.addEventListener('change', (e) => {
+      const isCustom = e.target.value === '__custom__';
+      $('customDiagnosisInput').disabled = !isCustom;
+      if (isCustom) {
+        $('customDiagnosisInput').focus();
+      }
     });
-    setReady(selected);
-  }));
-  $('selectionArea').classList.remove('hidden');
-  $('selectionArea').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+
+  // Clicking into the custom input automatically selects its radio button
+  $('customDiagnosisInput').addEventListener('focus', () => {
+    $('radioCustom').checked = true;
+    $('customDiagnosisInput').disabled = false;
+  });
+
+  show('resultsArea', true);
+  $('resultsArea').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
-function setReady(dx) {
-  $('saveBtn').disabled = !dx;
-  $('saveHint').textContent = dx ? 'Ready to save: ' + dx : 'Select a diagnosis to enable saving';
-  $('saveHint').className = 'text-center text-sm font-semibold ' + (dx ? 'text-brand-dark' : 'text-slate-500');
-}
+// Save Confirmed Diagnosis
+$('saveDiagnosisBtn').addEventListener('click', async (e) => {
+  const selectedRadio = document.querySelector('input[name="diagnosisOption"]:checked');
+  if (!selectedRadio) return SH.toast('Select a diagnosis or type a custom one.', 'error');
 
-async function finalize(text) {
-  await SH.api('/api/diagnosis', { json: { encounter_id: encounterId, selected_diagnosis: text, medications: $('medications').value.trim() } });
-  saved = true;
-}
+  let finalDiagnosis = selectedRadio.value;
+  if (finalDiagnosis === '__custom__') {
+    finalDiagnosis = $('customDiagnosisInput').value.trim();
+    if (!finalDiagnosis) return SH.toast('Please type your custom diagnosis.', 'error');
+  }
 
-$('saveBtn').addEventListener('click', async (e) => {
-  if (!selected) return;
+  const medications = $('medicationsInput').value.trim();
+
   try {
-    await SH.busy(e.currentTarget, 'Saving', () => finalize(selected));
-    $('selectionArea').classList.add('hidden');
-    $('analyzeBtn').classList.add('hidden');
-    $('goReferral').href = `/referral?encounter_id=${encounterId}`;
-    $('successMessage').classList.remove('hidden');
-    SH.toast('Diagnosis saved.', 'success');
-  } catch (err) { SH.toast(err.message, 'error'); }
+    const data = await SH.busy(e.currentTarget, 'Saving diagnosis', () =>
+      SH.api('/api/diagnosis', {
+        json: {
+          encounter_id: encounterId,
+          selected_diagnosis: finalDiagnosis,
+          medications
+        }
+      })
+    );
+
+    SH.toast('Diagnosis recorded successfully.', 'success');
+
+    // Populate draft instructions for the patient
+    const draft = medications
+      ? `Take your medication as directed: ${medications}. Get plenty of rest and drink clean water. Return immediately if you notice high fever or severe pain.`
+      : `Rest well, stay hydrated, and return to the clinic immediately if your condition worsens.`;
+    $('instructionText').value = draft;
+
+    // Show Audio Readout Bar
+    show('instructionBarArea', true);
+    $('goReferralBtn').href = `/referral?patient_id=${picker.value.id}&encounter_id=${encounterId}`;
+    $('instructionBarArea').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  } catch (err) {
+    SH.toast(err.message, 'error');
+  }
 });
 
-// Back button: don't silently lose an analysed case.
-$('backBtn').addEventListener('click', () => {
-  if (analysed && !selected && !saved) $('unsavedModal').classList.remove('hidden');
-  else location.href = '/dashboard';
-});
-$('modalCancel').addEventListener('click', () => $('unsavedModal').classList.add('hidden'));
-$('modalSave').addEventListener('click', async () => {
-  try { await finalize('Undiagnosed'); location.href = '/dashboard'; }
-  catch (err) { SH.toast(err.message, 'error'); }
+// Play Audio Instructions to Patient
+$('playInstructionBtn').addEventListener('click', async (e) => {
+  const text = $('instructionText').value.trim();
+  const language = $('instructionLang').value;
+  if (!text) return SH.toast('Type instructions to speak first.', 'error');
+
+  try {
+    const data = await SH.busy(e.currentTarget, 'Translating & speaking', () =>
+      SH.api('/api/tts_instruction', {
+        json: { text, language }
+      })
+    );
+    await new Audio(data.audio_url).play();
+  } catch (err) {
+    SH.toast(err.message, 'error');
+  }
 });
 </script>
 {% endblock %}
