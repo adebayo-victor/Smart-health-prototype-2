@@ -884,10 +884,9 @@ def update_patient(patient_id):
     return jsonify(patient.to_dict())
 
 
-# ============================================================================
-# INTAKE & TRANSLATION WITH PHYSICAL CONFIRMATION (TC)
-# ============================================================================
 
+
+# System prompt for extraction and Translation Confirmation (TC)
 TRANSLATION_SYSTEM_PROMPT = """You are a clinical transcription assistant for community health workers in Northern Nigeria.
 Analyze the patient's spoken statement (in Hausa, Nigerian Pidgin, or English).
 
@@ -925,63 +924,74 @@ RULES FOR tc_actions:
 @login_required
 def translate_audio():
     """
-    Transcribes audio or receives statement, translates it, extracts vitals,
-    and returns physical confirmation checks (TC actions).
-    NOTE: Does NOT save an encounter yet to prevent unnamed patient clutter.
+    Self-contained transcription and translation endpoint.
+    Safely handles audio files via Groq Whisper and extracts TC actions.
     """
-    audio_file = request.files.get('audio')
-    manual_text = request.form.get('statement') or (request.json.get('statement') if request.is_json else None)
-
-    transcript = ""
-    if audio_file:
-        transcript = transcribe_speech_groq(audio_file)
-    elif manual_text:
-        transcript = manual_text.strip()
-
-    if not transcript:
-        return jsonify({"error": "No speech or text could be detected. Please try recording again."}), 400
-
-    # Call LLM for translation and TC extraction
-    prompt = f"Patient statement: \"{transcript}\"\n\nProduce the structured clinical JSON."
-    raw_response = call_groq_llm(
-        messages=[
-            {"role": "system", "content": TRANSLATION_SYSTEM_PROMPT},
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.1,
-        response_format={"type": "json_object"}
-    )
-
     try:
-        data = json.loads(raw_response)
-    except Exception:
-        data = {
-            "dialect": "Unknown",
-            "statement": transcript,
-            "translation": transcript,
-            "conclusion": "Clinical review needed.",
-            "patient_name_mentioned": None,
-            "vitals": {},
-            "tc_actions": [
+        api_key = os.environ.get("GROQ_API_KEY")
+        if not api_key:
+            return jsonify({"error": "GROQ_API_KEY is not configured in Vercel environment variables."}), 500
+
+        audio_file = request.files.get('audio')
+        manual_text = request.form.get('statement') or (request.json.get('statement') if request.is_json else None)
+
+        groq_client = Groq(api_key=api_key)
+        transcript = ""
+
+        # 1. Transcribe Audio via Groq Whisper
+        if audio_file:
+            audio_bytes = audio_file.read()
+            if not audio_bytes:
+                return jsonify({"error": "Audio file is empty. Please record again."}), 400
+
+            filename = getattr(audio_file, 'filename', None) or 'recording.webm'
+            if not filename.endswith(('.webm', '.mp4', '.m4a', '.wav', '.ogg', '.mp3')):
+                filename = 'recording.webm'
+
+            transcription = groq_client.audio.transcriptions.create(
+                file=(filename, audio_bytes),
+                model="whisper-large-v3"
+            )
+            transcript = (transcription.text or "").strip()
+
+        elif manual_text:
+            transcript = manual_text.strip()
+
+        if not transcript:
+            return jsonify({"error": "No speech detected in audio. Please speak louder and try again."}), 400
+
+        # 2. Extract clinical data and TC actions via Groq LLM
+        # Use llama-3.3-70b-versatile or llama-3.1-8b-instant
+        llm_model = os.environ.get("LLM_MODEL", "llama-3.3-70b-versatile")
+        
+        chat_completion = groq_client.chat.completions.create(
+            model=llm_model,
+            messages=[
+                {"role": "system", "content": TRANSLATION_SYSTEM_PROMPT},
+                {"role": "user", "content": f'Patient statement: "{transcript}"\nProduce the structured clinical JSON.'}
+            ],
+            temperature=0.1,
+            response_format={"type": "json_object"}
+        )
+
+        raw_json = chat_completion.choices[0].message.content
+        data = json.loads(raw_json)
+
+        # Fallback guarantee for tc_actions
+        if not data.get("tc_actions"):
+            data["tc_actions"] = [
                 {
-                    "claim": "General complaint",
-                    "instruction": "Ask the patient to point to where they feel uncomfortable.",
-                    "expected": "Points to affected area"
+                    "claim": "Reported illness",
+                    "instruction": "Ask the patient to point with their hand to where they feel pain or discomfort.",
+                    "expected": "Points to matching body location"
                 }
             ]
-        }
 
-    # Ensure tc_actions is always a non-empty list
-    if not data.get("tc_actions"):
-        data["tc_actions"] = [
-            {
-                "claim": "Reported symptoms",
-                "instruction": "Ask the patient to point to where they feel sick or in pain.",
-                "expected": "Points to body region matching symptom"
-            }
-        ]
+        return jsonify(data)
 
-    return jsonify(data)
+    except Exception as exc:
+        # Return the actual error message so you can see it on screen immediately
+        return jsonify({"error": f"Translation failed: {str(exc)}"}), 500
 
 
 @app.route('/api/intake/save', methods=['POST'])
@@ -990,50 +1000,58 @@ def save_intake_encounter():
     """
     Persists an intake encounter ONLY after a valid patient has been assigned.
     """
-    payload = request.get_json(force=True) or {}
-    patient_id = payload.get('patient_id')
+    try:
+        payload = request.get_json(force=True) or {}
+        patient_id = payload.get('patient_id')
 
-    if not patient_id:
-        return jsonify({"error": "A patient must be chosen or created before saving."}), 400
+        if not patient_id:
+            return jsonify({"error": "A patient must be chosen or created before saving."}), 400
 
-    # Ensure patient belongs to current worker's facility
-    patient = Patient.query.filter_by(id=patient_id, facility_id=current_user.facility_id, is_active=True).first()
-    if not patient:
-        return jsonify({"error": "Patient not found in your facility registry."}), 404
+        patient = Patient.query.filter_by(id=patient_id, facility_id=current_user.facility_id, is_active=True).first()
+        if not patient:
+            return jsonify({"error": "Patient not found in your facility registry."}), 404
 
-    vitals = payload.get('vitals') or {}
-    tc_summary = payload.get('tc_summary') or "Unconfirmed"
-    tc_actions = payload.get('tc_actions') or []
+        vitals = payload.get('vitals') or {}
+        tc_summary = payload.get('tc_summary') or "Unconfirmed"
+        tc_actions = payload.get('tc_actions') or []
 
-    encounter = Encounter(
-        facility_id=current_user.facility_id,
-        patient_id=patient.id,
-        patient_name=patient.full_name,
-        origin_worker_id=current_user.id,
-        dialect=payload.get('dialect', 'English'),
-        statement=payload.get('statement', ''),
-        translation=payload.get('translation', ''),
-        vitals_json=json.dumps(vitals),
-        tc_steps_translation=json.dumps({
-            "conclusion": payload.get('conclusion', ''),
-            "summary": tc_summary,
-            "actions": tc_actions
-        }),
-        current_stage='intake',
-        status='open',
-        created_at=utcnow(),
-        updated_at=utcnow()
-    )
+        encounter = Encounter(
+            facility_id=current_user.facility_id,
+            patient_id=patient.id,
+            patient_name=patient.full_name,
+            origin_worker_id=current_user.id,
+            dialect=payload.get('dialect', 'English'),
+            statement=payload.get('statement', ''),
+            translation=payload.get('translation', ''),
+            vitals_json=json.dumps(vitals),
+            tc_steps_translation=json.dumps({
+                "conclusion": payload.get('conclusion', ''),
+                "summary": tc_summary,
+                "actions": tc_actions
+            }),
+            current_stage='intake',
+            status='open',
+            created_at=utcnow(),
+            updated_at=utcnow()
+        )
 
-    db.session.add(encounter)
-    db.session.commit()
+        db.session.add(encounter)
+        db.session.commit()
 
-    return jsonify({
-        "success": True,
-        "encounter_id": encounter.id,
-        "patient_id": patient.id,
-        "patient_name": patient.full_name
-    })
+        return jsonify({
+            "success": True,
+            "encounter_id": encounter.id,
+            "patient_id": patient.id,
+            "patient_name": patient.full_name
+        })
+    except Exception as exc:
+        db.session.rollback()
+        return jsonify({"error": f"Failed to save encounter: {str(exc)}"}), 500
+
+
+
+
+
 
 
 @app.route("/api/tts_instruction", methods=["POST"])
