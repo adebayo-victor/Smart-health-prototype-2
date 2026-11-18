@@ -1443,60 +1443,6 @@ def answer_patient(user_text, translated_text, past_memories, recent_chat):
     return res
 
 
-@app.route("/api/patient_emergency_referral", methods=["POST"])
-def patient_emergency_referral():
-    """Generates an instant emergency hospital referral code for a patient."""
-    data = request.get_json(silent=True) or {}
-    phone = clean_phone(data.get("phone_number"))
-    name = (data.get("full_name") or "").strip()[:100] or "Emergency Patient"
-    reason = (data.get("reason") or "Emergency referral from AI Voice Companion").strip()[:500]
-
-    if not phone:
-        return fail("Valid phone number required.", 400)
-
-    # Pick the first available hospital (or default to Murtala Muhammed Specialist Hospital)
-    hospital = MedicalCenter.query.filter_by(short_code="MU").first() or MedicalCenter.query.first()
-    if not hospital:
-        return fail("No receiving facility available.", 500)
-
-    try:
-        code = generate_referral_code(hospital.short_code)
-        qr_uri = make_qr_data_uri(code)
-
-        enc = Encounter(
-            facility_id=hospital.id,
-            origin_facility_id=hospital.id,
-            destination_facility_id=hospital.id,
-            patient_name=name,
-            dialect="Hausa",
-            statement=reason,
-            translation=reason,
-            triage_tier="RED",
-            triage_notes="Emergency self-referral triggered via voice companion.",
-            referral_facility=hospital.name,
-            referral_code=code,
-            referral_qr=qr_uri,
-            referral_reason=reason,
-            referral_status="pending",
-            current_stage="referral",
-            status="active",
-            created_at=utcnow(),
-            updated_at=utcnow()
-        )
-        db.session.add(enc)
-        db.session.commit()
-
-        return jsonify({
-            "success": True,
-            "referral_code": code,
-            "referral_qr": qr_uri,
-            "hospital_name": hospital.name,
-            "patient_name": name,
-            "reason": reason
-        })
-    except Exception as e:
-        db.session.rollback()
-        return fail("Could not generate emergency referral. Please go directly to the hospital.", 500, e)
 
 # ==========================================
 # LOCATION SEARCH & EMERGENCY OPEN PASS
@@ -1527,20 +1473,33 @@ def search_centers():
 
 @app.route("/api/patient_emergency_referral", methods=["POST"])
 def patient_emergency_referral():
-    """Generates an open emergency pass that can be accepted at any matching hospital."""
+    """
+    Handles both modes:
+    1. Direct Hospital Referral: When a specific facility is selected.
+    2. Location-Based Open Pass: When a patient provides their location for nearby hospitals.
+    """
     data = request.get_json(silent=True) or {}
     phone = clean_phone(data.get("phone_number"))
     name = (data.get("full_name") or "").strip()[:100] or "Emergency Patient"
-    reason = (data.get("reason") or "Emergency self-referral via Voice Companion").strip()[:500]
-    location = (data.get("location") or "Unspecified").strip()[:100]
+    reason = (data.get("reason") or "Emergency referral via Voice Companion").strip()[:500]
+    location = (data.get("location") or "").strip()[:100]
+    center_id = data.get("facility_id")
 
     if not phone:
         return fail("Valid phone number required.", 400)
 
-    # Use first matching facility's short code or generic EM prefix
-    center_id = data.get("facility_id")
-    hospital = db.session.get(MedicalCenter, center_id) if center_id else MedicalCenter.query.first()
+    # 1. Determine if this is an Open Emergency Pass or Direct Hospital Referral
+    hospital = db.session.get(MedicalCenter, center_id) if center_id else None
+    is_open_pass = bool(location and not center_id)
+
+    if not hospital:
+        # Default fallback facility for generating short_code
+        hospital = MedicalCenter.query.filter_by(short_code="MU").first() or MedicalCenter.query.first()
+
     short_code = hospital.short_code if hospital else "EM"
+    dest_id = None if is_open_pass else (hospital.id if hospital else None)
+    facility_name = "Open Emergency Pass (Nearby Centers)" if is_open_pass else (hospital.name if hospital else "Emergency Center")
+    stmt = f"Location: {location} | Symptoms: {reason}" if location else reason
 
     try:
         code = generate_referral_code(short_code)
@@ -1549,14 +1508,14 @@ def patient_emergency_referral():
         enc = Encounter(
             facility_id=hospital.id if hospital else 1,
             origin_facility_id=hospital.id if hospital else 1,
-            destination_facility_id=None,  # Open destination: any receiving hospital can accept!
+            destination_facility_id=dest_id,  # None = open to any arriving hospital
             patient_name=name,
             dialect="Hausa/English",
-            statement=f"Location: {location} | Symptoms: {reason}",
-            translation=f"Location: {location} | Symptoms: {reason}",
+            statement=stmt,
+            translation=stmt,
             triage_tier="RED",
-            triage_notes=f"Emergency self-referral from {location}.",
-            referral_facility="Open Emergency Pass (Nearby Centers)",
+            triage_notes=f"Emergency self-referral from {location}." if location else "Emergency direct referral via Voice Companion.",
+            referral_facility=facility_name,
             referral_code=code,
             referral_qr=qr_uri,
             referral_reason=reason,
@@ -1573,9 +1532,11 @@ def patient_emergency_referral():
             "success": True,
             "referral_code": code,
             "referral_qr": qr_uri,
-            "location": location,
+            "hospital_name": facility_name,
+            "location": location or None,
             "patient_name": name,
-            "reason": reason
+            "reason": reason,
+            "is_open_pass": is_open_pass
         })
     except Exception as e:
         db.session.rollback()
