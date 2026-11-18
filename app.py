@@ -887,6 +887,7 @@ def update_patient(patient_id):
 
 
 # System prompt for extraction and Translation Confirmation (TC)
+# System prompt adding ONLY the TC confirmation actions
 TRANSLATION_SYSTEM_PROMPT = """You are a clinical transcription assistant for community health workers in Northern Nigeria.
 Analyze the patient's spoken statement (in Hausa, Nigerian Pidgin, or English).
 
@@ -906,44 +907,35 @@ Return STRICT JSON with these keys:
   },
   "tc_actions": [
     {
-      "claim": "Short symptom or detail extracted (e.g., Severe Headache)",
-      "instruction": "Physical non-invasive instruction for the worker to give the patient (e.g., Ask the patient to point with one finger to where the pain is located)",
-      "expected": "Expected physical response (e.g., Points to forehead or crown of head)"
+      "claim": "Short symptom extracted (e.g. Headache)",
+      "instruction": "Physical non-invasive instruction for the worker to give the patient (e.g. Ask patient to point to where it hurts)",
+      "expected": "Expected physical response (e.g. Points to head)"
     }
   ]
 }
 
 RULES FOR tc_actions:
-1. Provide 1 to 3 physical verification actions.
-2. Actions must be purely non-invasive physical gestures (pointing, showing fingers for number of days, breathing demonstration, coughing).
-3. NEVER instruct the worker to touch sensitive body parts or perform invasive examinations.
-4. Do NOT use simple Yes/No questions; use physical demonstrations so the worker can confirm comprehension without language barriers.
+1. Provide 1 to 3 non-invasive physical verification checks.
+2. No invasive touch. Use physical actions (pointing, showing fingers for days) rather than Yes/No questions.
 """
 
 @app.route('/api/translate', methods=['POST'])
 @login_required
 def translate_audio():
-    """
-    Self-contained transcription and translation endpoint.
-    Safely handles audio files via Groq Whisper and extracts TC actions.
-    """
     try:
-        api_key = os.environ.get("GROQ_API_KEY")
-        if not api_key:
-            return jsonify({"error": "GROQ_API_KEY is not configured in Vercel environment variables."}), 500
-
         audio_file = request.files.get('audio')
         manual_text = request.form.get('statement') or (request.json.get('statement') if request.is_json else None)
 
-        groq_client = Groq(api_key=api_key)
         transcript = ""
 
-        # 1. Transcribe Audio via Groq Whisper
+        # 1. Speech-to-Text via Groq Whisper
         if audio_file:
+            groq_key = os.environ.get("GROQ_API_KEY")
+            if not groq_key:
+                return jsonify({"error": "GROQ_API_KEY is missing for audio transcription."}), 500
+            
+            groq_client = Groq(api_key=groq_key)
             audio_bytes = audio_file.read()
-            if not audio_bytes:
-                return jsonify({"error": "Audio file is empty. Please record again."}), 400
-
             filename = getattr(audio_file, 'filename', None) or 'recording.webm'
             if not filename.endswith(('.webm', '.mp4', '.m4a', '.wav', '.ogg', '.mp3')):
                 filename = 'recording.webm'
@@ -958,13 +950,19 @@ def translate_audio():
             transcript = manual_text.strip()
 
         if not transcript:
-            return jsonify({"error": "No speech detected in audio. Please speak louder and try again."}), 400
+            return jsonify({"error": "No speech detected in audio. Please try recording again."}), 400
 
-        # 2. Extract clinical data and TC actions via Groq LLM
-        # Use llama-3.3-70b-versatile or llama-3.1-8b-instant
-        llm_model = os.environ.get("LLM_MODEL", "llama-3.3-70b-versatile")
-        
-        chat_completion = groq_client.chat.completions.create(
+        # 2. LLM Translation & TC Extraction using YOUR configured model & endpoint
+        llm_api_key = os.environ.get("LITELLM_API_KEY") or os.environ.get("OPENAI_API_KEY", "default-key")
+        llm_base_url = os.environ.get("LITELLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
+        llm_model = os.environ.get("LLM_MODEL", "bedrock-deepseek-v3-2")
+
+        llm_client = OpenAI(
+            api_key=llm_api_key,
+            base_url=llm_base_url
+        )
+
+        chat_completion = llm_client.chat.completions.create(
             model=llm_model,
             messages=[
                 {"role": "system", "content": TRANSLATION_SYSTEM_PROMPT},
@@ -977,12 +975,11 @@ def translate_audio():
         raw_json = chat_completion.choices[0].message.content
         data = json.loads(raw_json)
 
-        # Fallback guarantee for tc_actions
         if not data.get("tc_actions"):
             data["tc_actions"] = [
                 {
-                    "claim": "Reported illness",
-                    "instruction": "Ask the patient to point with their hand to where they feel pain or discomfort.",
+                    "claim": "Reported symptoms",
+                    "instruction": "Ask the patient to point to where they feel sick or in pain.",
                     "expected": "Points to matching body location"
                 }
             ]
@@ -990,7 +987,6 @@ def translate_audio():
         return jsonify(data)
 
     except Exception as exc:
-        # Return the actual error message so you can see it on screen immediately
         return jsonify({"error": f"Translation failed: {str(exc)}"}), 500
 
 
