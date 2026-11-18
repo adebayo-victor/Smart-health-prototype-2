@@ -919,130 +919,114 @@ RULES FOR tc_actions:
 2. No invasive touch. Use physical actions (pointing, showing fingers for days) rather than Yes/No questions.
 """
 
-@app.route('/api/translate', methods=['POST'])
+@app.route("/api/translate", methods=["POST"])
 @login_required
 def translate_audio():
+    audio_file = request.files.get("audio")
+    if not audio_file:
+        return fail("No audio file provided.", 400)
     try:
-        audio_file = request.files.get('audio')
-        manual_text = request.form.get('statement') or (request.json.get('statement') if request.is_json else None)
+        raw_text = transcribe(audio_file)
+    except ValueError as e:
+        return fail(str(e), 400)
+    except Exception as e:
+        return fail("Could not transcribe the audio. Check your connection and try again.", 502, e)
 
-        transcript = ""
+    # Your original prompt + TC action checks
+    prompt = f"""
+    You are a medical data extraction assistant. Analyze this patient statement recorded by a health worker in Nigeria.
+    The statement may be in Hausa, Nigerian Pidgin, or English.
+    STATEMENT: "{raw_text}"
+    Return ONLY valid JSON (no markdown, no extra text):
+    {{
+      "patient_name_mentioned": "Patient name if explicitly mentioned in statement, otherwise null",
+      "dialect": "Detected language: Hausa, Pidgin, or English",
+      "statement": "The original statement exactly as transcribed",
+      "translation": "The statement translated into clear English",
+      "vitals": {{
+        "temp": "temperature in Celsius or 'N/A'",
+        "bp_sys": "systolic BP or 'N/A'",
+        "bp_dia": "diastolic BP or 'N/A'",
+        "spo2": "oxygen saturation % or 'N/A'"
+      }},
+      "conclusion": "One-sentence clinical summary of the main complaint",
+      "tc_actions": [
+        {{
+          "claim": "Symptom extracted (e.g. Severe Headache)",
+          "instruction": "Physical non-invasive instruction for the worker to give the patient (e.g. Ask the patient to point with one finger to where it hurts)",
+          "expected": "Expected physical response (e.g. Points to forehead or crown of head)"
+        }}
+      ]
+    }}
+    Rules for tc_actions: Provide 1 to 3 non-invasive physical checks (pointing, showing fingers for days). No sensitive touching. No simple Yes/No questions.
+    """
+    try:
+        data = llm_json(prompt, 0.2)
+    except Exception as e:
+        return fail("The AI returned unreadable data. Please try again.", 502, e)
 
-        # 1. Speech-to-Text via Groq Whisper
-        if audio_file:
-            groq_key = os.environ.get("GROQ_API_KEY")
-            if not groq_key:
-                return jsonify({"error": "GROQ_API_KEY is missing for audio transcription."}), 500
-            
-            groq_client = Groq(api_key=groq_key)
-            audio_bytes = audio_file.read()
-            filename = getattr(audio_file, 'filename', None) or 'recording.webm'
-            if not filename.endswith(('.webm', '.mp4', '.m4a', '.wav', '.ogg', '.mp3')):
-                filename = 'recording.webm'
+    if not data.get("tc_actions"):
+        data["tc_actions"] = [
+            {
+                "claim": "Reported symptoms",
+                "instruction": "Ask the patient to point with their hand to where they feel discomfort.",
+                "expected": "Points to location of pain"
+            }
+        ]
 
-            transcription = groq_client.audio.transcriptions.create(
-                file=(filename, audio_bytes),
-                model="whisper-large-v3"
-            )
-            transcript = (transcription.text or "").strip()
-
-        elif manual_text:
-            transcript = manual_text.strip()
-
-        if not transcript:
-            return jsonify({"error": "No speech detected in audio. Please try recording again."}), 400
-
-        # 2. LLM Translation & TC Extraction using YOUR configured model & endpoint
-        llm_api_key = os.environ.get("LITELLM_API_KEY") or os.environ.get("OPENAI_API_KEY", "default-key")
-        llm_base_url = os.environ.get("LITELLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
-        llm_model = os.environ.get("LLM_MODEL", "bedrock-deepseek-v3-2")
-
-        llm_client = OpenAI(
-            api_key=llm_api_key,
-            base_url=llm_base_url
-        )
-
-        chat_completion = llm_client.chat.completions.create(
-            model=llm_model,
-            messages=[
-                {"role": "system", "content": TRANSLATION_SYSTEM_PROMPT},
-                {"role": "user", "content": f'Patient statement: "{transcript}"\nProduce the structured clinical JSON.'}
-            ],
-            temperature=0.1,
-            response_format={"type": "json_object"}
-        )
-
-        raw_json = chat_completion.choices[0].message.content
-        data = json.loads(raw_json)
-
-        if not data.get("tc_actions"):
-            data["tc_actions"] = [
-                {
-                    "claim": "Reported symptoms",
-                    "instruction": "Ask the patient to point to where they feel sick or in pain.",
-                    "expected": "Points to matching body location"
-                }
-            ]
-
-        return jsonify(data)
-
-    except Exception as exc:
-        return jsonify({"error": f"Translation failed: {str(exc)}"}), 500
+    vitals = data.get("vitals") or {}
+    stored = {
+        "temp": to_float(vitals.get("temp")),
+        "sys_bp": to_float(vitals.get("bp_sys")),
+        "dia_bp": to_float(vitals.get("bp_dia")),
+        "spo2": to_float(vitals.get("spo2"))
+    }
+    data["vitals"] = {k: v for k, v in stored.items() if v is not None}
+    
+    # We return the data without auto-creating an unlinked "Unnamed Patient" encounter.
+    return jsonify(data)
 
 
-@app.route('/api/intake/save', methods=['POST'])
+@app.route("/api/intake/save", methods=["POST"])
 @login_required
-def save_intake_encounter():
-    """
-    Persists an intake encounter ONLY after a valid patient has been assigned.
-    """
-    try:
-        payload = request.get_json(force=True) or {}
-        patient_id = payload.get('patient_id')
+def save_intake():
+    """Saves encounter only after a patient is picked or created."""
+    data = request.get_json(silent=True) or {}
+    patient_id = data.get("patient_id")
+    if not patient_id:
+        return fail("Choose or create a patient first.", 400)
 
-        if not patient_id:
-            return jsonify({"error": "A patient must be chosen or created before saving."}), 400
+    patient = get_facility_patient(patient_id)
+    if not patient:
+        return fail("Patient not found in your facility.", 404)
 
-        patient = Patient.query.filter_by(id=patient_id, facility_id=current_user.facility_id, is_active=True).first()
-        if not patient:
-            return jsonify({"error": "Patient not found in your facility registry."}), 404
+    vitals = data.get("vitals") or {}
+    tc_summary = data.get("tc_summary") or "Unconfirmed"
+    tc_actions = data.get("tc_actions") or []
 
-        vitals = payload.get('vitals') or {}
-        tc_summary = payload.get('tc_summary') or "Unconfirmed"
-        tc_actions = payload.get('tc_actions') or []
+    enc = new_encounter(
+        patient=patient,
+        dialect=data.get("dialect"),
+        statement=data.get("statement"),
+        translation=data.get("translation"),
+        vitals_json=json.dumps(vitals),
+        tc_steps_translation=json.dumps({
+            "conclusion": data.get("conclusion"),
+            "summary": tc_summary,
+            "actions": tc_actions
+        }),
+        current_stage="translation",
+        status="active"
+    )
+    db.session.commit()
 
-        encounter = Encounter(
-            facility_id=current_user.facility_id,
-            patient_id=patient.id,
-            patient_name=patient.full_name,
-            origin_worker_id=current_user.id,
-            dialect=payload.get('dialect', 'English'),
-            statement=payload.get('statement', ''),
-            translation=payload.get('translation', ''),
-            vitals_json=json.dumps(vitals),
-            tc_steps_translation=json.dumps({
-                "conclusion": payload.get('conclusion', ''),
-                "summary": tc_summary,
-                "actions": tc_actions
-            }),
-            current_stage='intake',
-            status='open',
-            created_at=utcnow(),
-            updated_at=utcnow()
-        )
+    return jsonify({
+        "status": "saved",
+        "encounter_id": enc.id,
+        "patient_id": patient.id,
+        "patient_name": patient.full_name
+    })
 
-        db.session.add(encounter)
-        db.session.commit()
-
-        return jsonify({
-            "success": True,
-            "encounter_id": encounter.id,
-            "patient_id": patient.id,
-            "patient_name": patient.full_name
-        })
-    except Exception as exc:
-        db.session.rollback()
-        return jsonify({"error": f"Failed to save encounter: {str(exc)}"}), 500
 
 
 
