@@ -1234,17 +1234,28 @@ def lookup_patient():
     src = Encounter.query.filter_by(referral_code=code).first()
     if not src:
         return fail("No patient found with this code.", 404)
-    # For regular transfers, restrict to destination. For emergency open passes, allow any receiving hospital:
-    if src.destination_facility_id and src.destination_facility_id != session["facility_id"]:
+
+    current_fid = session["facility_id"]
+    current_fname = session.get("facility_name")
+
+    # Access control: regular transfers vs. emergency open passes
+    if src.destination_facility_id and src.destination_facility_id != current_fid:
+        # Allow claiming ONLY if it is an active RED emergency referral
         if src.triage_tier == "RED" and src.referral_status == "pending":
-            # Claim this emergency patient for the current facility
-            src.destination_facility_id = session["facility_id"]
-            src.referral_facility = session.get("facility_name", src.referral_facility)
+            src.destination_facility_id = current_fid
+            if current_fname:
+                src.referral_facility = current_fname
+        elif src.referral_status == "fulfilled":
+            dest_center = db.session.get(MedicalCenter, src.destination_facility_id)
+            dest_name = dest_center.name if dest_center else "another facility"
+            return fail(f"This referral code was already used and checked in at {dest_name}.", 403)
         else:
-            return fail("Access denied: this referral is not addressed to your facility.", 403)
+            return fail("Access denied: this referral is addressed to a different facility.", 403)
     elif not src.destination_facility_id:
-        src.destination_facility_id = session["facility_id"]
-        src.referral_facility = session.get("facility_name", src.referral_facility)
+        # Open emergency pass claimed by the arriving facility
+        src.destination_facility_id = current_fid
+        if current_fname:
+            src.referral_facility = current_fname
 
     try:
         local = receive_referral(src)
@@ -1255,21 +1266,38 @@ def lookup_patient():
         db.session.rollback()
         return fail("Could not open this referral. Try again.", 500, e)
 
+    # Resolve originating medical center name safely
+    from_center = None
+    origin_id = src.origin_facility_id or src.facility_id
+    if origin_id:
+        mc = db.session.get(MedicalCenter, origin_id)
+        if mc:
+            from_center = mc.name
+    if not from_center:
+        from_center = "Patient Self-Referral (Companion)"
+
+    vitals = {}
+    if src.vitals_json:
+        try:
+            vitals = json.loads(src.vitals_json)
+        except (TypeError, ValueError):
+            vitals = {}
+
     return jsonify({
         "encounter_id": local.id,
         "patient": local.patient.to_dict() if local.patient else None,
         "patient_name": src.patient_name,
         "referral_code": src.referral_code,
-        "facility": src.referral_facility,
-        "from_facility": db.session.get(MedicalCenter, src.facility_id).name if src.facility_id else None,
+        "facility": src.referral_facility or current_fname,
+        "from_facility": from_center,
         "reason": src.referral_reason,
         "referral_status": src.referral_status,
         "triage_tier": src.triage_tier,
         "triage_notes": src.triage_notes,
         "diagnosis": src.diagnosis_notes,
         "medications": src.diagnosis_medications,
-        "vitals": json.loads(src.vitals_json) if src.vitals_json else {},
-        "created_at": src.created_at.strftime("%Y-%m-%d %H:%M"),
+        "vitals": vitals,
+        "created_at": src.created_at.strftime("%Y-%m-%d %H:%M") if src.created_at else "",
     })
 
 
