@@ -1,153 +1,189 @@
 {% extends "base.html" %}
-{% from "_macros.html" import icon %}
+{% from "_macros.html" import icon, page_header %}
 {% set active = 'ledger' %}
-{% block title %}Patient ledger · SmartHealth{% endblock %}
+{% block title %}Dashboard · SmartHealth{% endblock %}
 
 {% block content %}
-{% set base = {'tier': current_tier, 'stage': current_stage, 'search': current_search} %}
-{% macro link(key, value) -%}{{ url_for('dashboard', **dict(base, **{key: value})) }}{%- endmacro %}
-{% macro chip(label, key, value, current, on='bg-ink text-white', off='bg-slate-100 text-slate-700 hover:bg-slate-200') -%}
-<a href="{{ link(key, value) }}" {% if current == value %}aria-current="true"{% endif %}
-   class="px-3.5 min-h-10 inline-flex items-center rounded-full text-sm font-semibold whitespace-nowrap transition {{ on if current == value else off }}">{{ label }}</a>
-{%- endmacro %}
-
-<div class="flex items-center justify-between mb-4">
-  <h1 class="text-xl font-black text-ink">Patient ledger</h1>
-  <a href="/translator" class="inline-flex items-center gap-1.5 px-4 min-h-11 bg-brand text-white rounded-xl text-sm font-bold hover:bg-brand-dark transition shadow-sm">
-    {{ icon('plus', 'h-4 w-4') }} New intake
-  </a>
-</div>
-
-<!-- Snapshot -->
-<div class="grid grid-cols-4 gap-2 mb-5 text-center">
-  <a href="{{ link('tier', 'RED') }}" class="bg-white rounded-xl border border-slate-200 border-t-4 border-t-danger py-2.5">
-    <span class="block text-2xl font-black tabular-nums text-danger">{{ stats.red }}</span><span class="text-xs font-semibold text-slate-500">Red</span></a>
-  <a href="{{ link('tier', 'YELLOW') }}" class="bg-white rounded-xl border border-slate-200 border-t-4 border-t-warn py-2.5">
-    <span class="block text-2xl font-black tabular-nums text-warn">{{ stats.yellow }}</span><span class="text-xs font-semibold text-slate-500">Yellow</span></a>
-  <a href="{{ link('tier', 'GREEN') }}" class="bg-white rounded-xl border border-slate-200 border-t-4 border-t-brand py-2.5">
-    <span class="block text-2xl font-black tabular-nums text-brand">{{ stats.green }}</span><span class="text-xs font-semibold text-slate-500">Green</span></a>
-  <a href="{{ link('stage', 'referred') }}" class="bg-white rounded-xl border border-slate-200 border-t-4 border-t-info py-2.5">
-    <span class="block text-2xl font-black tabular-nums text-info">{{ stats.incoming }}</span><span class="text-xs font-semibold text-slate-500">Incoming</span></a>
-</div>
-
-<!-- Search -->
-<form action="/dashboard" method="GET" class="mb-3" role="search">
-  <input type="hidden" name="tier" value="{{ current_tier }}">
-  <input type="hidden" name="stage" value="{{ current_stage }}">
-  <div class="relative">
-    <span class="absolute left-3 top-3.5 text-slate-400">{{ icon('search') }}</span>
-    <input type="search" name="search" value="{{ current_search }}" placeholder="Search patient name" aria-label="Search patient name"
-           class="w-full min-h-12 pl-10 pr-10 rounded-xl border border-slate-300 bg-white text-base">
-    {% if current_search %}
-    <a href="{{ link('search', '') }}" aria-label="Clear search" class="absolute right-1 top-1 w-10 h-10 flex items-center justify-center text-slate-400 hover:text-slate-700">{{ icon('x') }}</a>
-    {% endif %}
-  </div>
-</form>
-
-<!-- Filters -->
-<div class="flex gap-2 overflow-x-auto no-scrollbar pb-1 mb-2" role="group" aria-label="Filter by risk">
-  {{ chip('All risk', 'tier', 'all', current_tier) }}
-  {{ chip('Red', 'tier', 'RED', current_tier, 'bg-danger text-white', 'bg-danger-soft text-danger-dark hover:bg-red-100') }}
-  {{ chip('Yellow', 'tier', 'YELLOW', current_tier, 'bg-warn text-white', 'bg-warn-soft text-warn-dark hover:bg-amber-100') }}
-  {{ chip('Green', 'tier', 'GREEN', current_tier, 'bg-brand text-white', 'bg-brand-soft text-brand-dark hover:bg-emerald-100') }}
-</div>
-<div class="flex gap-2 overflow-x-auto no-scrollbar pb-1 mb-5" role="group" aria-label="Filter by stage">
-  {{ chip('All stages', 'stage', 'all', current_stage) }}
-  {{ chip('Triage', 'stage', 'triage', current_stage) }}
-  {{ chip('Diagnosis', 'stage', 'diagnosis', current_stage) }}
-  {{ chip('Referred', 'stage', 'referred', current_stage) }}
-</div>
-
-<!-- Ledger -->
-{% if encounters %}
-<ul class="space-y-3">
-  {% for enc in encounters %}
-  {% set mine = enc.origin_worker_id == current_worker_id %}
-  {% set vitals = enc.vitals_json | fromjson %}
-  <li>
-    <details class="group bg-white rounded-xl border border-slate-200 rail rail-{{ enc.triage_tier or 'NONE' }} shadow-sm">
-      <summary class="list-none cursor-pointer p-4 flex items-start gap-3 [&::-webkit-details-marker]:hidden">
-        <div class="flex-1 min-w-0">
-          <div class="flex items-baseline gap-2 mb-1.5">
-            <span class="font-black text-ink truncate">{{ enc.patient_name }}</span>
-            <span class="text-xs text-slate-500 whitespace-nowrap">{{ enc.created_at.strftime('%d %b, %I:%M %p') }}</span>
-          </div>
-          <div class="flex flex-wrap items-center gap-1.5 mb-2">
-            {% if enc.triage_tier == 'RED' %}<span class="text-xs font-bold px-2 py-0.5 rounded bg-danger-soft text-danger-dark">Red</span>
-            {% elif enc.triage_tier == 'YELLOW' %}<span class="text-xs font-bold px-2 py-0.5 rounded bg-warn-soft text-warn-dark">Yellow</span>
-            {% elif enc.triage_tier == 'GREEN' %}<span class="text-xs font-bold px-2 py-0.5 rounded bg-brand-soft text-brand-dark">Green</span>
-            {% else %}<span class="text-xs font-semibold px-2 py-0.5 rounded bg-slate-100 text-slate-500">Not triaged</span>{% endif %}
-            <span class="text-xs font-semibold px-2 py-0.5 rounded bg-slate-100 text-slate-700 capitalize">{{ enc.current_stage }}</span>
-            {% if enc.current_stage == 'referral' %}
-              {% if mine %}
-              <span class="text-xs font-semibold px-2 py-0.5 rounded bg-info-soft text-info">Sent to {{ facility_centers.get(enc.destination_facility_id, 'unknown') }}</span>
-              {% else %}
-              <span class="text-xs font-semibold px-2 py-0.5 rounded bg-purple-100 text-purple-700">Received referral</span>
-              {% endif %}
-              {% if enc.referral_status == 'fulfilled' %}
-              <span class="text-xs font-bold px-2 py-0.5 rounded bg-brand text-white">Fulfilled</span>
-              {% else %}
-              <span class="text-xs font-bold px-2 py-0.5 rounded bg-warn text-white">Pending</span>
-              {% endif %}
-            {% endif %}
-          </div>
-          <p class="text-sm text-slate-600 line-clamp-2">
-            {{ enc.diagnosis_notes or enc.triage_notes or ('Reason: ' ~ enc.referral_reason if enc.referral_reason) or enc.translation or 'No notes yet.' }}
-          </p>
-        </div>
-        <span class="mt-1 text-slate-300 transition-transform group-open:rotate-90">{{ icon('chevron') }}</span>
-      </summary>
-
-      <div class="px-4 pb-4 pt-3 border-t border-slate-100 space-y-3 text-sm">
-        {% if enc.translation %}<div><p class="font-semibold text-slate-500">Patient said</p><p>{{ enc.translation }}</p></div>{% endif %}
-        {% if vitals %}
-        <div class="flex flex-wrap gap-1.5">
-          {% for label, key in [('Temp', 'temp'), ('HR', 'hr'), ('Sys', 'sys_bp'), ('Dia', 'dia_bp'), ('SpO2', 'spo2')] %}
-            {% if vitals.get(key) is not none %}<span class="px-2 py-1 rounded-lg bg-slate-100 text-xs font-semibold tabular-nums">{{ label }} {{ vitals[key] }}</span>{% endif %}
-          {% endfor %}
-        </div>
-        {% endif %}
-        {% if enc.triage_notes %}<div><p class="font-semibold text-slate-500">Triage</p><p>{{ enc.triage_notes }}</p></div>{% endif %}
-        {% if enc.diagnosis_notes %}<div><p class="font-semibold text-slate-500">Diagnosis</p><p>{{ enc.diagnosis_notes }}{% if enc.diagnosis_medications %}<br><span class="text-slate-600">Medication: {{ enc.diagnosis_medications }}</span>{% endif %}</p></div>{% endif %}
-        {% if enc.referral_code %}<div><p class="font-semibold text-slate-500">Referral</p><p><span class="font-black tracking-wider">{{ enc.referral_code }}</span>, {{ enc.referral_reason }}</p></div>{% endif %}
-
-        <div class="flex flex-wrap gap-2 pt-1">
-          {% if mine and enc.current_stage == 'translation' %}
-            <a href="/triage?encounter_id={{ enc.id }}" class="px-4 min-h-11 inline-flex items-center bg-ink text-white rounded-lg font-bold">Continue to triage</a>
-          {% elif mine and enc.current_stage == 'triage' %}
-            <a href="/diagnosis?encounter_id={{ enc.id }}" class="px-4 min-h-11 inline-flex items-center bg-ink text-white rounded-lg font-bold">Continue to diagnosis</a>
-          {% elif mine and enc.current_stage == 'diagnosis' %}
-            <a href="/referral?encounter_id={{ enc.id }}" class="px-4 min-h-11 inline-flex items-center bg-ink text-white rounded-lg font-bold">Refer patient</a>
-          {% endif %}
-          {% if enc.referral_code and not mine %}
-            <a href="/lookup?code={{ enc.referral_code }}" class="px-4 min-h-11 inline-flex items-center bg-brand text-white rounded-lg font-bold">Open in lookup</a>
-          {% endif %}
-        </div>
+<div class="space-y-6">
+  <!-- Header with risk snapshot -->
+  <div>
+    <div class="flex items-center justify-between mb-4">
+      <div>
+        <h1 class="text-2xl font-black text-ink">Clinical Ledger</h1>
+        <p class="text-xs text-slate-500">{{ current_worker.facility if current_worker else 'Facility Registry' }}</p>
       </div>
-    </details>
-  </li>
-  {% endfor %}
-</ul>
+      <a href="/translator" class="min-h-11 px-4 bg-brand text-white rounded-xl text-sm font-bold flex items-center gap-1.5 hover:bg-brand-dark transition shadow-sm">
+        {{ icon('plus', 'h-4 w-4') }} New intake
+      </a>
+    </div>
 
-{% if pagination.pages > 1 %}
-<nav class="flex items-center justify-between mt-6" aria-label="Pages">
-  {% if pagination.has_prev %}<a href="{{ link('page', pagination.prev_num) }}" class="px-4 min-h-11 inline-flex items-center rounded-lg bg-white border border-slate-300 font-semibold">Newer</a>{% else %}<span></span>{% endif %}
-  <span class="text-sm text-slate-500">Page {{ pagination.page }} of {{ pagination.pages }}</span>
-  {% if pagination.has_next %}<a href="{{ link('page', pagination.next_num) }}" class="px-4 min-h-11 inline-flex items-center rounded-lg bg-white border border-slate-300 font-semibold">Older</a>{% else %}<span></span>{% endif %}
-</nav>
-{% endif %}
+    <!-- Triage Risk Snapshot Counters -->
+    <div class="grid grid-cols-4 gap-2 text-center">
+      <a href="/dashboard?tier=RED" class="p-3 rounded-xl bg-danger-soft border border-danger/30 hover:opacity-90 transition">
+        <span class="text-lg font-black text-danger-dark tabular-nums">{{ stats.red }}</span>
+        <span class="block text-xs font-bold text-danger-dark">Red</span>
+      </a>
+      <a href="/dashboard?tier=YELLOW" class="p-3 rounded-xl bg-warn-soft border border-warn/30 hover:opacity-90 transition">
+        <span class="text-lg font-black text-warn-dark tabular-nums">{{ stats.yellow }}</span>
+        <span class="block text-xs font-bold text-warn-dark">Yellow</span>
+      </a>
+      <a href="/dashboard?tier=GREEN" class="p-3 rounded-xl bg-brand-soft border border-brand/30 hover:opacity-90 transition">
+        <span class="text-lg font-black text-brand-dark tabular-nums">{{ stats.green }}</span>
+        <span class="block text-xs font-bold text-brand-dark">Green</span>
+      </a>
+      <a href="#referralsView" onclick="switchTab('received')" class="p-3 rounded-xl bg-info/10 border border-info/30 hover:opacity-90 transition">
+        <span class="text-lg font-black text-info tabular-nums">{{ stats.incoming }}</span>
+        <span class="block text-xs font-bold text-info">Incoming</span>
+      </a>
+    </div>
+  </div>
 
-{% else %}
-<div class="text-center py-12 bg-white rounded-xl border border-dashed border-slate-300 px-6">
-  <div class="mx-auto mb-3 text-slate-300 w-fit">{{ icon('ledger', 'h-12 w-12') }}</div>
-  {% if current_tier != 'all' or current_stage != 'all' or current_search %}
-    <p class="font-semibold text-slate-700">No patients match these filters.</p>
-    <a href="/dashboard" class="inline-block mt-3 text-brand font-bold hover:underline min-h-11 leading-[2.75rem]">Clear all filters</a>
-  {% else %}
-    <p class="font-semibold text-slate-700">No patients yet.</p>
-    <p class="text-sm text-slate-500 mt-1">Record the first patient's statement to start the ledger.</p>
-    <a href="/translator" class="inline-block mt-4 px-5 min-h-12 leading-[3rem] bg-brand text-white rounded-xl font-bold">Start a new intake</a>
-  {% endif %}
+  <!-- Navigation View Tabs (Encounters vs Referrals) -->
+  <div class="flex border-b border-slate-200">
+    <button id="tabEncounters" onclick="switchTab('encounters')" class="py-2.5 px-4 font-bold text-sm border-b-2 border-brand text-brand">
+      Patient Encounters
+    </button>
+    <button id="tabReferrals" onclick="switchTab('referrals')" class="py-2.5 px-4 font-bold text-sm border-b-2 border-transparent text-slate-500 hover:text-ink">
+      Referrals History (Sent & Received)
+    </button>
+  </div>
+
+  <!-- VIEW 1: Regular Encounters Ledger -->
+  <div id="encountersSection" class="space-y-4">
+    <!-- Search and Stage Filters -->
+    <form method="GET" action="/dashboard" class="flex gap-2">
+      <input type="text" name="search" value="{{ current_search }}" placeholder="Search by name, phone, or hospital ID..."
+        class="flex-1 min-h-12 px-3.5 rounded-xl border border-slate-300 text-sm bg-white">
+      <button type="submit" class="min-h-12 px-4 bg-ink text-white rounded-xl text-sm font-bold">Search</button>
+      {% if current_search or current_tier != 'ALL' or current_stage != 'all' %}
+        <a href="/dashboard" class="min-h-12 px-3 bg-slate-200 text-ink rounded-xl text-sm font-bold flex items-center">Clear</a>
+      {% endif %}
+    </form>
+
+    <!-- Encounter Rows -->
+    <div class="space-y-2.5">
+      {% for enc in encounters %}
+        <div class="bg-white rounded-xl border border-slate-200 p-4 hover:border-slate-300 transition">
+          <div class="flex items-start justify-between">
+            <div>
+              <div class="flex items-center gap-2">
+                <span class="font-bold text-ink">{{ enc.patient_name }}</span>
+                {% if enc.triage_tier %}
+                  <span class="text-xs font-bold px-2 py-0.5 rounded-full
+                    {% if enc.triage_tier == 'RED' %}bg-danger-soft text-danger-dark
+                    {% elif enc.triage_tier == 'YELLOW' %}bg-warn-soft text-warn-dark
+                    {% else %}bg-brand-soft text-brand-dark{% endif %}">
+                    {{ enc.triage_tier }}
+                  </span>
+                {% endif %}
+              </div>
+              <p class="text-xs text-slate-500 mt-0.5">Stage: <strong class="capitalize">{{ enc.current_stage or 'Intake' }}</strong> · {{ enc.created_at.strftime('%d %b, %I:%M %p') }}</p>
+            </div>
+            <a href="/triage?patient_id={{ enc.patient_id }}&encounter_id={{ enc.id }}" class="min-h-9 px-3 bg-slate-100 hover:bg-slate-200 text-ink rounded-lg text-xs font-bold flex items-center">
+              Continue
+            </a>
+          </div>
+
+          {% if enc.diagnosis_notes %}
+            <p class="mt-2 text-xs text-slate-700 bg-slate-50 p-2 rounded-lg border border-slate-100">
+              <strong>Diagnosis:</strong> {{ enc.diagnosis_notes }}
+            </p>
+          {% endif %}
+        </div>
+      {% else %}
+        <div class="text-center py-10 bg-white rounded-2xl border border-dashed border-slate-300">
+          <p class="text-sm font-bold text-slate-500">No encounters found.</p>
+        </div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <!-- VIEW 2: Referrals History (Sent vs Received) -->
+  <div id="referralsSection" class="hidden space-y-4">
+    <div class="flex gap-2">
+      <button id="subtabSent" onclick="switchReferralSubtab('sent')" class="min-h-10 px-4 rounded-xl text-xs font-bold bg-ink text-white">
+        Referrals Sent Out
+      </button>
+      <button id="subtabReceived" onclick="switchReferralSubtab('received')" class="min-h-10 px-4 rounded-xl text-xs font-bold bg-slate-200 text-ink">
+        Incoming Referrals ({{ incoming|length }})
+      </button>
+    </div>
+
+    <!-- Sent Subtab -->
+    <div id="sentReferralsList" class="space-y-2.5">
+      {% for enc in sent_referrals %}
+        <div class="bg-white rounded-xl border border-slate-200 p-4">
+          <div class="flex items-center justify-between mb-1">
+            <span class="font-bold text-ink text-sm">{{ enc.patient_name }}</span>
+            <span class="text-xs font-bold px-2 py-0.5 rounded-full {{ 'bg-brand-soft text-brand-dark' if enc.referral_status == 'fulfilled' else 'bg-warn-soft text-warn-dark' }}">
+              {{ enc.referral_status|upper }}
+            </span>
+          </div>
+          <p class="text-xs text-slate-600">Referred to: <strong>{{ enc.referral_facility or 'Specialist Center' }}</strong></p>
+          <div class="flex items-center justify-between mt-2 pt-2 border-t border-slate-100 text-xs">
+            <span class="font-mono font-bold text-brand">{{ enc.referral_code }}</span>
+            <span class="text-slate-400">{{ enc.created_at.strftime('%d %b %Y') }}</span>
+          </div>
+        </div>
+      {% else %}
+        <div class="text-center py-8 bg-white rounded-xl border border-dashed border-slate-300 text-xs text-slate-500">
+          No referrals have been sent from this facility yet.
+        </div>
+      {% endfor %}
+    </div>
+
+    <!-- Received Subtab -->
+    <div id="receivedReferralsList" class="hidden space-y-2.5">
+      {% for enc in incoming %}
+        <div class="bg-white rounded-xl border border-info/40 p-4">
+          <div class="flex items-center justify-between mb-1">
+            <span class="font-bold text-ink text-sm">{{ enc.patient_name }}</span>
+            <span class="text-xs font-bold px-2 py-0.5 rounded-full bg-info/10 text-info">PENDING ARRIVAL</span>
+          </div>
+          <p class="text-xs text-slate-600">Reason: {{ enc.referral_reason or 'Urgent Assessment' }}</p>
+          <div class="flex items-center justify-between mt-3 pt-2 border-t border-slate-100">
+            <span class="font-mono text-xs font-bold text-ink">{{ enc.referral_code }}</span>
+            <a href="/lookup?code={{ enc.referral_code }}" class="min-h-9 px-3 bg-brand text-white rounded-lg text-xs font-bold flex items-center gap-1">
+              {{ icon('check', 'h-3.5 w-3.5') }} Ingest in Lookup
+            </a>
+          </div>
+        </div>
+      {% else %}
+        <div class="text-center py-8 bg-white rounded-xl border border-dashed border-slate-300 text-xs text-slate-500">
+          No incoming referrals awaiting arrival.
+        </div>
+      {% endfor %}
+    </div>
+  </div>
 </div>
-{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+function switchTab(tab) {
+  const isEnc = tab === 'encounters';
+  document.getElementById('encountersSection').classList.toggle('hidden', !isEnc);
+  document.getElementById('referralsSection').classList.toggle('hidden', isEnc);
+
+  document.getElementById('tabEncounters').className = isEnc
+    ? 'py-2.5 px-4 font-bold text-sm border-b-2 border-brand text-brand'
+    : 'py-2.5 px-4 font-bold text-sm border-b-2 border-transparent text-slate-500 hover:text-ink';
+  document.getElementById('tabReferrals').className = !isEnc
+    ? 'py-2.5 px-4 font-bold text-sm border-b-2 border-brand text-brand'
+    : 'py-2.5 px-4 font-bold text-sm border-b-2 border-transparent text-slate-500 hover:text-ink';
+}
+
+function switchReferralSubtab(sub) {
+  const isSent = sub === 'sent';
+  document.getElementById('sentReferralsList').classList.toggle('hidden', !isSent);
+  document.getElementById('receivedReferralsList').classList.toggle('hidden', isSent);
+
+  document.getElementById('subtabSent').className = isSent
+    ? 'min-h-10 px-4 rounded-xl text-xs font-bold bg-ink text-white'
+    : 'min-h-10 px-4 rounded-xl text-xs font-bold bg-slate-200 text-ink';
+  document.getElementById('subtabReceived').className = !isSent
+    ? 'min-h-10 px-4 rounded-xl text-xs font-bold bg-ink text-white'
+    : 'min-h-10 px-4 rounded-xl text-xs font-bold bg-slate-200 text-ink';
+}
+</script>
 {% endblock %}
