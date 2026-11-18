@@ -884,61 +884,156 @@ def update_patient(patient_id):
     return jsonify(patient.to_dict())
 
 
-@app.route("/api/translate", methods=["POST"])
+# ============================================================================
+# INTAKE & TRANSLATION WITH PHYSICAL CONFIRMATION (TC)
+# ============================================================================
+
+TRANSLATION_SYSTEM_PROMPT = """You are a clinical transcription assistant for community health workers in Northern Nigeria.
+Analyze the patient's spoken statement (in Hausa, Nigerian Pidgin, or English).
+
+Return STRICT JSON with these keys:
+{
+  "dialect": "Hausa" | "Nigerian Pidgin" | "English" | "Mixed",
+  "statement": "Verbatim transcript of what was said in the original language",
+  "translation": "Accurate, clear English translation of symptoms and context",
+  "conclusion": "1-2 sentence clinical summary of chief complaint",
+  "patient_name_mentioned": "Name if the patient explicitly stated their name, otherwise null",
+  "vitals": {
+    "temp": "numeric Celsius or null",
+    "bp_sys": "numeric systolic or null",
+    "bp_dia": "numeric diastolic or null",
+    "spo2": "numeric oxygen saturation % or null",
+    "heart_rate": "numeric bpm or null"
+  },
+  "tc_actions": [
+    {
+      "claim": "Short symptom or detail extracted (e.g., Severe Headache)",
+      "instruction": "Physical non-invasive instruction for the worker to give the patient (e.g., Ask the patient to point with one finger to where the pain is located)",
+      "expected": "Expected physical response (e.g., Points to forehead or crown of head)"
+    }
+  ]
+}
+
+RULES FOR tc_actions:
+1. Provide 1 to 3 physical verification actions.
+2. Actions must be purely non-invasive physical gestures (pointing, showing fingers for number of days, breathing demonstration, coughing).
+3. NEVER instruct the worker to touch sensitive body parts or perform invasive examinations.
+4. Do NOT use simple Yes/No questions; use physical demonstrations so the worker can confirm comprehension without language barriers.
+"""
+
+@app.route('/api/translate', methods=['POST'])
 @login_required
 def translate_audio():
-    audio_file = request.files.get("audio")
-    if not audio_file:
-        return fail("No audio file provided.", 400)
-    try:
-        raw_text = transcribe(audio_file)
-    except ValueError as e:
-        return fail(str(e), 400)
-    except Exception as e:
-        return fail("Could not transcribe the audio. Check your connection and try again.", 502, e)
-
-    prompt = f"""
-    You are a medical data extraction assistant. Analyze this patient statement recorded by a health worker in Nigeria.
-    The statement may be in Hausa, Nigerian Pidgin, or English.
-    STATEMENT: "{raw_text}"
-    Return ONLY valid JSON (no markdown, no extra text):
-    {{
-      "patient_name": "Patient's name if mentioned, otherwise 'Unnamed Patient'",
-      "dialect": "Detected language: Hausa, Pidgin, or English",
-      "statement": "The original statement exactly as transcribed",
-      "translation": "The statement translated into clear English",
-      "vitals": {{
-        "temp": "temperature in Celsius or 'N/A'",
-        "bp_sys": "systolic BP or 'N/A'",
-        "bp_dia": "diastolic BP or 'N/A'",
-        "spo2": "oxygen saturation % or 'N/A'"
-      }},
-      "conclusion": "One-sentence clinical summary of the main complaint"
-    }}
     """
-    try:
-        data = llm_json(prompt, 0.2)
-    except json.JSONDecodeError:
-        return fail("The AI returned unreadable data. Please try again.", 502, True)
-    except Exception as e:
-        return fail("The AI service is unavailable. Please try again.", 502, e)
+    Transcribes audio or receives statement, translates it, extracts vitals,
+    and returns physical confirmation checks (TC actions).
+    NOTE: Does NOT save an encounter yet to prevent unnamed patient clutter.
+    """
+    audio_file = request.files.get('audio')
+    manual_text = request.form.get('statement') or (request.json.get('statement') if request.is_json else None)
 
-    vitals = data.get("vitals") or {}
-    # Stored vitals use the same keys as the triage form.
-    stored = {"temp": to_float(vitals.get("temp")), "sys_bp": to_float(vitals.get("bp_sys")),
-              "dia_bp": to_float(vitals.get("bp_dia")), "spo2": to_float(vitals.get("spo2"))}
-    # The encounter starts unlinked; the worker confirms WHO the patient is in the next step.
-    enc = new_encounter(
-        patient_name=str(data.get("patient_name") or "Unnamed Patient")[:100],
-        dialect=data.get("dialect"), statement=data.get("statement"), translation=data.get("translation"),
-        vitals_json=json.dumps({k: v for k, v in stored.items() if v is not None}),
-        tc_steps_translation=json.dumps({"conclusion": data.get("conclusion")}),
-        current_stage="translation", status="active",
+    transcript = ""
+    if audio_file:
+        transcript = transcribe_speech_groq(audio_file)
+    elif manual_text:
+        transcript = manual_text.strip()
+
+    if not transcript:
+        return jsonify({"error": "No speech or text could be detected. Please try recording again."}), 400
+
+    # Call LLM for translation and TC extraction
+    prompt = f"Patient statement: \"{transcript}\"\n\nProduce the structured clinical JSON."
+    raw_response = call_groq_llm(
+        messages=[
+            {"role": "system", "content": TRANSLATION_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.1,
+        response_format={"type": "json_object"}
     )
-    db.session.commit()
-    data["encounter_id"] = enc.id
-    data["vitals"] = vitals
+
+    try:
+        data = json.loads(raw_response)
+    except Exception:
+        data = {
+            "dialect": "Unknown",
+            "statement": transcript,
+            "translation": transcript,
+            "conclusion": "Clinical review needed.",
+            "patient_name_mentioned": None,
+            "vitals": {},
+            "tc_actions": [
+                {
+                    "claim": "General complaint",
+                    "instruction": "Ask the patient to point to where they feel uncomfortable.",
+                    "expected": "Points to affected area"
+                }
+            ]
+        }
+
+    # Ensure tc_actions is always a non-empty list
+    if not data.get("tc_actions"):
+        data["tc_actions"] = [
+            {
+                "claim": "Reported symptoms",
+                "instruction": "Ask the patient to point to where they feel sick or in pain.",
+                "expected": "Points to body region matching symptom"
+            }
+        ]
+
     return jsonify(data)
+
+
+@app.route('/api/intake/save', methods=['POST'])
+@login_required
+def save_intake_encounter():
+    """
+    Persists an intake encounter ONLY after a valid patient has been assigned.
+    """
+    payload = request.get_json(force=True) or {}
+    patient_id = payload.get('patient_id')
+
+    if not patient_id:
+        return jsonify({"error": "A patient must be chosen or created before saving."}), 400
+
+    # Ensure patient belongs to current worker's facility
+    patient = Patient.query.filter_by(id=patient_id, facility_id=current_user.facility_id, is_active=True).first()
+    if not patient:
+        return jsonify({"error": "Patient not found in your facility registry."}), 404
+
+    vitals = payload.get('vitals') or {}
+    tc_summary = payload.get('tc_summary') or "Unconfirmed"
+    tc_actions = payload.get('tc_actions') or []
+
+    encounter = Encounter(
+        facility_id=current_user.facility_id,
+        patient_id=patient.id,
+        patient_name=patient.full_name,
+        origin_worker_id=current_user.id,
+        dialect=payload.get('dialect', 'English'),
+        statement=payload.get('statement', ''),
+        translation=payload.get('translation', ''),
+        vitals_json=json.dumps(vitals),
+        tc_steps_translation=json.dumps({
+            "conclusion": payload.get('conclusion', ''),
+            "summary": tc_summary,
+            "actions": tc_actions
+        }),
+        current_stage='intake',
+        status='open',
+        created_at=utcnow(),
+        updated_at=utcnow()
+    )
+
+    db.session.add(encounter)
+    db.session.commit()
+
+    return jsonify({
+        "success": True,
+        "encounter_id": encounter.id,
+        "patient_id": patient.id,
+        "patient_name": patient.full_name
+    })
 
 
 @app.route("/api/tts_instruction", methods=["POST"])
