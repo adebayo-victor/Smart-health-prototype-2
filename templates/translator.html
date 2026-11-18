@@ -94,11 +94,10 @@
     </div>
 
     <div id="tcActionsList" class="space-y-3"></div>
-
     <div id="tcFeedback" class="hidden p-3 rounded-xl text-xs font-bold"></div>
   </div>
 
-  <!-- Step 4: Link Patient (Prevents Unnamed Patient records) -->
+  <!-- Step 4: Link Patient -->
   <div class="bg-white rounded-2xl border border-slate-200 p-4 space-y-4">
     <div>
       <h3 class="text-sm font-bold text-ink mb-1">Step 4. Assign Encounter to Patient</h3>
@@ -112,7 +111,7 @@
     </button>
   </div>
 
-  <!-- Navigation CTAs (Visible after saving) -->
+  <!-- Navigation CTAs -->
   <div id="nextStepsArea" class="hidden bg-white rounded-2xl border border-slate-200 p-4 space-y-3">
     <p class="text-sm font-bold text-ink">Encounter Saved! What next?</p>
     <a id="goTriage" href="/triage" class="min-h-14 bg-brand text-white rounded-xl font-bold flex items-center justify-center hover:bg-brand-dark transition">
@@ -178,11 +177,12 @@ $('clearBtn').addEventListener('click', clearAudio);
 
 // ---- Step 3 & 4: Translation + TC State ----
 let extractedData = null;
-let tcResults = {}; // { action_idx: 'matched' | 'mismatched' }
-const picker = SH.PatientPicker($('patientPicker'));
+let tcResults = {};
+// Correct instantiation using 'new':
+const picker = new SH.PatientPicker($('patientPicker'));
 
 $('translateBtn').addEventListener('click', async (e) => {
-  if (!audio) return;
+  if (!audio) return SH.toast('Please record or upload audio first.', 'error');
   show('errorState', false); show('resultsArea', false); show('nextStepsArea', false);
   const form = new FormData();
   form.append('audio', audio.blob, audio.filename);
@@ -202,7 +202,6 @@ const known = (v) => v && String(v).toUpperCase() !== 'N/A';
 function renderIntakeView(d) {
   tcResults = {};
 
-  // 1. Render Read-Only Translation Information
   const v = d.vitals || {};
   const vParts = [];
   if (known(v.temp)) vParts.push(`Temp ${v.temp}°C`);
@@ -230,7 +229,6 @@ function renderIntakeView(d) {
     ${d.conclusion ? `<div class="p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-700"><strong>Clinical Summary:</strong> ${SH.esc(d.conclusion)}</div>` : ''}
   `;
 
-  // 2. Render Translation Confirmation (TC) Box
   const actions = d.tc_actions || [];
   $('tcActionsList').innerHTML = actions.map((act, i) => `
     <div class="bg-white rounded-xl border border-slate-200 p-3.5 space-y-2">
@@ -258,7 +256,6 @@ function renderIntakeView(d) {
       const val = e.currentTarget.dataset.val;
       tcResults[idx] = val;
 
-      // Update button styling in this card
       const parent = e.currentTarget.closest('.bg-white');
       parent.querySelectorAll('.tc-btn').forEach(b => {
         b.className = 'tc-btn min-h-10 text-xs font-bold rounded-lg border border-slate-300 transition flex items-center justify-center gap-1.5';
@@ -274,13 +271,8 @@ function renderIntakeView(d) {
 
   updateTcStatus(actions.length);
 
-  // If LLM extracted a potential patient name, pre-fill search
   if (d.patient_name_mentioned) {
-    const input = $('patientPicker').querySelector('input');
-    if (input) {
-      input.value = d.patient_name_mentioned;
-      input.dispatchEvent(new Event('input'));
-    }
+    picker.suggest(d.patient_name_mentioned);
   }
 
   show('translateBtn', false);
@@ -315,9 +307,10 @@ function updateTcStatus(total) {
 
 // ---- Step 4: Persist Intake Encounter ----
 $('saveIntakeBtn').addEventListener('click', async (e) => {
-  const patient = picker.getPatient();
+  // Correctly uses picker.value:
+  const patient = picker.value;
   if (!patient || !patient.id) {
-    return SH.toast('Please select or add a patient before continuing.', 'error');
+    return picker.require();
   }
 
   const actions = extractedData.tc_actions || [];
