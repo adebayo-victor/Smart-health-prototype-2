@@ -1,85 +1,275 @@
 {% extends "base.html" %}
 {% from "_macros.html" import icon, page_header %}
 {% set active = 'lookup' %}
-{% block title %}Patient lookup · SmartHealth{% endblock %}
+{% block title %}Lookup & Patient Merge · SmartHealth{% endblock %}
 
 {% block content %}
-{{ page_header('Patient lookup', '/dashboard', 'Enter the referral code the patient brought.') }}
+{{ page_header('Lookup & Patient Registry', '/dashboard', 'Ingest incoming referrals or merge duplicate patient records.') }}
 
-<form id="lookupForm" class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm mb-6">
-  <label for="codeInput" class="text-sm font-semibold text-slate-600 block mb-2">Referral code</label>
-  <div class="flex gap-2">
-    <input type="text" id="codeInput" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="20" placeholder="e.g. AK-J8RQEE"
-           class="flex-1 min-w-0 min-h-14 px-4 rounded-xl border-2 border-slate-300 bg-surface text-xl font-black text-center uppercase tracking-wider focus:border-brand">
-    <button type="submit" id="searchBtn" class="min-h-14 px-6 bg-ink text-white rounded-xl font-bold hover:bg-slate-800 transition">Search</button>
-  </div>
-  <p id="errorMsg" role="alert" class="hidden text-danger-dark text-sm font-semibold mt-3 text-center"></p>
-</form>
+<!-- Sub-navigation Tabs -->
+<div class="flex border-b border-slate-200 mb-6">
+  <button id="tabLookupBtn" onclick="switchLookupView('lookup')" class="py-2.5 px-4 font-bold text-sm border-b-2 border-brand text-brand">
+    Referral Code Lookup
+  </button>
+  <button id="tabMergeBtn" onclick="switchLookupView('merge')" class="py-2.5 px-4 font-bold text-sm border-b-2 border-transparent text-slate-500 hover:text-ink">
+    Merge Duplicate Patients
+  </button>
+</div>
 
-<section id="patientRecord" class="hidden space-y-3" aria-live="polite">
-  <div class="bg-brand-soft p-5 rounded-2xl border-2 border-brand text-center">
-    <p class="text-sm font-bold text-brand-dark mb-1">Patient identified</p>
-    <h2 id="pName" class="text-2xl font-black"></h2>
-    <p class="text-sm font-semibold text-brand-dark mt-2">
-      Code <span id="pCode" class="font-black tracking-wider"></span>, status
-      <span id="pStatus" class="capitalize bg-white px-2 py-0.5 rounded"></span>
-    </p>
-    <span id="pTier" class="hidden mt-3 text-sm font-bold px-3 py-1 rounded-full"></span>
+<!-- VIEW 1: Referral Code Lookup -->
+<div id="lookupView" class="space-y-6">
+  <form id="lookupForm" class="bg-white rounded-2xl border border-slate-200 p-4 space-y-3 shadow-sm">
+    <label for="codeInput" class="text-xs font-bold text-slate-500 uppercase tracking-wider block">Enter Referral Code</label>
+    <div class="flex gap-2">
+      <input type="text" id="codeInput" placeholder="e.g. MU-D457AJ" required
+        class="flex-1 min-h-12 px-3.5 rounded-xl border border-slate-300 font-mono font-bold text-lg uppercase tracking-wider bg-white">
+      <button type="submit" id="searchBtn" class="min-h-12 px-5 bg-brand text-white rounded-xl font-bold text-sm hover:bg-brand-dark transition">
+        Lookup
+      </button>
+    </div>
+  </form>
+
+  <div id="lookupResult" class="hidden bg-white rounded-2xl border-2 border-brand p-5 space-y-4 shadow-sm">
+    <div class="flex items-center justify-between pb-3 border-b border-slate-100">
+      <div>
+        <h3 id="resPatientName" class="text-lg font-black text-ink"></h3>
+        <p id="resFromFacility" class="text-xs text-slate-500"></p>
+      </div>
+      <span id="resTierBadge" class="text-xs font-bold px-3 py-1 rounded-full uppercase"></span>
+    </div>
+
+    <div class="space-y-2 text-xs text-slate-700">
+      <p><strong>Referral Reason:</strong> <span id="resReason"></span></p>
+      <p id="resDiagnosisLine" class="hidden"><strong>Diagnosis:</strong> <span id="resDiagnosis"></span></p>
+      <div id="resVitalsGrid" class="p-2.5 bg-slate-50 rounded-xl border border-slate-200 text-slate-600 font-mono"></div>
+    </div>
+
+    <div class="pt-2 flex gap-2">
+      <a id="resContinueTriage" href="/triage" class="flex-1 min-h-11 bg-brand text-white rounded-xl font-bold text-xs flex items-center justify-center hover:bg-brand-dark transition">
+        Continue to Triage
+      </a>
+      <a id="resContinueDiagnosis" href="/diagnosis" class="flex-1 min-h-11 bg-ink text-white rounded-xl font-bold text-xs flex items-center justify-center hover:bg-slate-800 transition">
+        Continue to Diagnosis
+      </a>
+    </div>
+  </div>
+</div>
+
+<!-- VIEW 2: Patient Merge Tool -->
+<div id="mergeView" class="hidden space-y-6">
+  <div class="bg-white rounded-2xl border border-slate-200 p-5 space-y-4 shadow-sm">
+    <div>
+      <h3 class="font-bold text-ink text-base">Merge Duplicate Records</h3>
+      <p class="text-xs text-slate-500">Combine two patient records. All encounter history will be reassigned to the primary record.</p>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <!-- Primary Patient (To Keep) -->
+      <div class="p-4 rounded-xl border-2 border-brand bg-brand-soft/20 space-y-2">
+        <span class="text-xs font-black text-brand uppercase tracking-wider block">1. Primary Patient (Keep this record)</span>
+        <input type="text" id="primarySearch" placeholder="Search by name, phone or ID..." class="w-full min-h-11 px-3 rounded-lg border border-slate-300 text-xs bg-white">
+        <div id="primaryResults" class="max-h-40 overflow-y-auto space-y-1 text-xs"></div>
+        <div id="primarySelectedCard" class="hidden p-2.5 bg-white rounded-lg border border-brand text-xs font-bold text-ink"></div>
+      </div>
+
+      <!-- Secondary Patient (To Merge Away) -->
+      <div class="p-4 rounded-xl border-2 border-danger bg-danger-soft/20 space-y-2">
+        <span class="text-xs font-black text-danger uppercase tracking-wider block">2. Duplicate Patient (Merge away)</span>
+        <input type="text" id="secondarySearch" placeholder="Search by name, phone or ID..." class="w-full min-h-11 px-3 rounded-lg border border-slate-300 text-xs bg-white">
+        <div id="secondaryResults" class="max-h-40 overflow-y-auto space-y-1 text-xs"></div>
+        <div id="secondarySelectedCard" class="hidden p-2.5 bg-white rounded-lg border border-danger text-xs font-bold text-ink"></div>
+      </div>
+    </div>
+
+    <button id="executeMergeBtn" class="w-full min-h-12 bg-ink text-white rounded-xl font-bold text-sm hover:bg-slate-800 transition disabled:opacity-50" disabled>
+      Merge Selected Records
+    </button>
   </div>
 
-  <div class="bg-white p-4 rounded-xl border border-slate-200">
-    <p class="text-sm font-semibold text-slate-500 mb-1">Referral reason</p>
-    <p id="pReason" class="font-bold"></p>
-    <p class="text-sm text-slate-500 mt-2">To: <span id="pFacility" class="font-bold text-slate-700"></span></p>
+  <!-- Undo Merge Action Banner -->
+  <div id="undoMergeCard" class="hidden p-4 rounded-2xl bg-warn-soft border border-warn text-warn-dark flex items-center justify-between shadow-sm">
+    <div>
+      <p class="font-bold text-xs">Records merged successfully.</p>
+      <p id="undoDetailText" class="text-[11px]"></p>
+    </div>
+    <button id="undoMergeBtn" class="min-h-9 px-3 bg-white text-warn-dark border border-warn/40 rounded-lg text-xs font-bold hover:bg-slate-50 transition">
+      Undo Merge
+    </button>
   </div>
-  <div class="bg-white p-4 rounded-xl border border-slate-200">
-    <p class="text-sm font-semibold text-slate-500 mb-1">Triage and vitals</p>
-    <p id="pTriage"></p>
-    <div id="pVitals" class="flex flex-wrap gap-1.5 mt-2"></div>
-  </div>
-  <div class="bg-white p-4 rounded-xl border border-slate-200">
-    <p class="text-sm font-semibold text-slate-500 mb-1">Diagnosis and treatment</p>
-    <p id="pDiag"></p>
-    <p id="pMeds" class="text-sm text-slate-600 mt-2"></p>
-  </div>
-</section>
+</div>
 {% endblock %}
 
 {% block scripts %}
 <script>
 const $ = (id) => document.getElementById(id);
-const TIER = { RED: ['Red', 'bg-danger text-white'], YELLOW: ['Yellow', 'bg-warn text-white'], GREEN: ['Green', 'bg-brand text-white'] };
-const VITAL_LABELS = { temp: 'Temp', hr: 'HR', sys_bp: 'Sys', dia_bp: 'Dia', bp_sys: 'Sys', bp_dia: 'Dia', spo2: 'SpO2' };
+const show = (id, on = true) => $(id).classList.toggle('hidden', !on);
 
-async function lookup(code) {
-  $('errorMsg').classList.add('hidden'); $('patientRecord').classList.add('hidden');
-  if (!code) { $('errorMsg').textContent = 'Enter a referral code.'; return $('errorMsg').classList.remove('hidden'); }
-  try {
-    const d = await SH.busy($('searchBtn'), 'Searching', () => SH.api('/api/lookup', { json: { code } }));
-    $('pName').textContent = d.patient_name;
-    $('pCode').textContent = d.referral_code;
-    $('pStatus').textContent = d.referral_status;
-    $('pReason').textContent = d.reason || '';
-    $('pFacility').textContent = d.facility || '';
-    $('pTriage').textContent = d.triage_notes || 'No triage notes available.';
-    $('pDiag').textContent = d.diagnosis || 'No diagnosis recorded.';
-    $('pMeds').textContent = d.medications ? 'Medication: ' + d.medications : '';
+// ---- Sub-Tabs Switcher ----
+function switchLookupView(view) {
+  const isLookup = view === 'lookup';
+  show('lookupView', isLookup);
+  show('mergeView', !isLookup);
 
-    const tier = $('pTier'), t = TIER[d.triage_tier];
-    tier.classList.toggle('hidden', !t);
-    if (t) { tier.className = `inline-block mt-3 text-sm font-bold px-3 py-1 rounded-full ${t[1]}`; tier.textContent = t[0] + ' triage'; }
-
-    $('pVitals').innerHTML = Object.entries(d.vitals || {}).filter(([, v]) => v !== null && v !== 'N/A' && v !== '')
-      .map(([k, v]) => `<span class="px-2 py-1 rounded-lg bg-slate-100 text-xs font-semibold tabular-nums">${SH.esc(VITAL_LABELS[k] || k)} ${SH.esc(v)}</span>`).join('');
-    $('patientRecord').classList.remove('hidden');
-    $('patientRecord').scrollIntoView({ behavior: 'smooth', block: 'start' });
-  } catch (err) {
-    $('errorMsg').textContent = err.message; $('errorMsg').classList.remove('hidden');
-  }
+  $('tabLookupBtn').className = isLookup
+    ? 'py-2.5 px-4 font-bold text-sm border-b-2 border-brand text-brand'
+    : 'py-2.5 px-4 font-bold text-sm border-b-2 border-transparent text-slate-500 hover:text-ink';
+  $('tabMergeBtn').className = !isLookup
+    ? 'py-2.5 px-4 font-bold text-sm border-b-2 border-brand text-brand'
+    : 'py-2.5 px-4 font-bold text-sm border-b-2 border-transparent text-slate-500 hover:text-ink';
 }
 
-$('lookupForm').addEventListener('submit', (e) => { e.preventDefault(); lookup($('codeInput').value.trim()); });
-const initial = new URLSearchParams(location.search).get('code');
-if (initial) { $('codeInput').value = initial.toUpperCase(); lookup(initial); }
+// Pre-fill lookup code from URL
+(function init() {
+  const params = new URLSearchParams(window.location.search);
+  const code = params.get('code');
+  if (code) {
+    $('codeInput').value = code;
+    $('lookupForm').dispatchEvent(new Event('submit'));
+  }
+})();
+
+// ---- Lookup Submission ----
+$('lookupForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const code = $('codeInput').value.trim();
+  if (!code) return;
+
+  try {
+    const data = await SH.busy($('searchBtn'), 'Looking up...', () =>
+      SH.api('/api/lookup', { json: { code } })
+    );
+
+    $('resPatientName').textContent = data.patient_name;
+    $('resFromFacility').textContent = `From: ${data.from_facility || 'Unknown'}`;
+    $('resReason').textContent = data.reason || 'None provided';
+
+    const tb = $('resTierBadge');
+    tb.textContent = data.triage_tier || 'TRIAGE NEEDED';
+    tb.className = `text-xs font-bold px-3 py-1 rounded-full uppercase ${
+      data.triage_tier === 'RED' ? 'bg-danger text-white' :
+      data.triage_tier === 'YELLOW' ? 'bg-warn text-white' : 'bg-brand text-white'
+    }`;
+
+    if (data.diagnosis) {
+      $('resDiagnosis').textContent = data.diagnosis;
+      show('resDiagnosisLine', true);
+    } else {
+      show('resDiagnosisLine', false);
+    }
+
+    const v = data.vitals || {};
+    const vList = [];
+    if (v.temp) vList.push(`Temp: ${v.temp}°C`);
+    if (v.spo2) vList.push(`SpO2: ${v.spo2}%`);
+    if (v.sys_bp && v.dia_bp) vList.push(`BP: ${v.sys_bp}/${v.dia_bp}`);
+    $('resVitalsGrid').textContent = vList.length ? vList.join(' · ') : 'No vitals recorded';
+
+    const pId = data.patient ? data.patient.id : '';
+    const q = `?patient_id=${encodeURIComponent(pId)}&encounter_id=${encodeURIComponent(data.encounter_id)}`;
+    $('resContinueTriage').href = '/triage' + q;
+    $('resContinueDiagnosis').href = '/diagnosis' + q;
+
+    show('lookupResult', true);
+  } catch (err) {
+    SH.toast(err.message, 'error');
+  }
+});
+
+// ---- Merge Records Tool ----
+let selectedPrimary = null;
+let selectedSecondary = null;
+let lastMergedSecondaryId = null;
+
+function setupSearch(inputId, resultsId, onSelect) {
+  let timer;
+  $(inputId).addEventListener('input', (e) => {
+    clearTimeout(timer);
+    const q = e.target.value.trim();
+    if (!q) { $(resultsId).innerHTML = ''; return; }
+    timer = setTimeout(async () => {
+      try {
+        const patients = await SH.api(`/api/patients?q=${encodeURIComponent(q)}`);
+        $(resultsId).innerHTML = patients.map(p => `
+          <div class="p-2 bg-slate-50 hover:bg-slate-100 rounded cursor-pointer flex justify-between" data-id="${p.id}">
+            <span><strong>${SH.esc(p.full_name)}</strong> (${p.phone || 'No phone'})</span>
+            <span class="text-slate-500">${p.hospital_id ? 'ID: ' + p.hospital_id : ''}</span>
+          </div>
+        `).join('');
+
+        $(resultsId).querySelectorAll('[data-id]').forEach(div => {
+          div.addEventListener('click', () => {
+            const chosen = patients.find(p => p.id == div.dataset.id);
+            onSelect(chosen);
+            $(resultsId).innerHTML = '';
+          });
+        });
+      } catch (_) {}
+    }, 250);
+  });
+}
+
+setupSearch('primarySearch', 'primaryResults', (p) => {
+  selectedPrimary = p;
+  $('primarySelectedCard').innerHTML = `✓ Selected: <strong>${SH.esc(p.full_name)}</strong> (${p.phone || 'No phone'})`;
+  show('primarySelectedCard', true);
+  checkMergeReady();
+});
+
+setupSearch('secondarySearch', 'secondaryResults', (p) => {
+  selectedSecondary = p;
+  $('secondarySelectedCard').innerHTML = `✓ Selected: <strong>${SH.esc(p.full_name)}</strong> (${p.phone || 'No phone'})`;
+  show('secondarySelectedCard', true);
+  checkMergeReady();
+});
+
+function checkMergeReady() {
+  const ready = selectedPrimary && selectedSecondary && (selectedPrimary.id !== selectedSecondary.id);
+  $('executeMergeBtn').disabled = !ready;
+}
+
+$('executeMergeBtn').addEventListener('click', async (e) => {
+  if (!confirm(`Are you sure you want to merge ${selectedSecondary.full_name} into ${selectedPrimary.full_name}? All encounter history will be combined.`)) {
+    return;
+  }
+
+  try {
+    const res = await SH.busy(e.currentTarget, 'Merging...', () =>
+      SH.api('/api/patients/merge', {
+        json: { primary_id: selectedPrimary.id, secondary_id: selectedSecondary.id }
+      })
+    );
+
+    lastMergedSecondaryId = res.merged_secondary_id;
+    $('undoDetailText').textContent = `${selectedSecondary.full_name} was folded into ${selectedPrimary.full_name}.`;
+    show('undoMergeCard', true);
+
+    // Reset selection
+    selectedPrimary = null;
+    selectedSecondary = null;
+    show('primarySelectedCard', false);
+    show('secondarySelectedCard', false);
+    $('primarySearch').value = '';
+    $('secondarySearch').value = '';
+    $('executeMergeBtn').disabled = true;
+
+    SH.toast('Records merged successfully.', 'success');
+  } catch (err) {
+    SH.toast(err.message, 'error');
+  }
+});
+
+$('undoMergeBtn').addEventListener('click', async (e) => {
+  if (!lastMergedSecondaryId) return;
+  try {
+    await SH.busy(e.currentTarget, 'Undoing...', () =>
+      SH.api(`/api/patients/undo-merge/${lastMergedSecondaryId}`, { method: 'POST' })
+    );
+    show('undoMergeCard', false);
+    lastMergedSecondaryId = null;
+    SH.toast('Merge undone. Secondary record restored.', 'success');
+  } catch (err) {
+    SH.toast(err.message, 'error');
+  }
+});
 </script>
 {% endblock %}
