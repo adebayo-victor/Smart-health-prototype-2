@@ -6,13 +6,54 @@
 {% block content %}
 {{ page_header('Clinical diagnosis', '/dashboard', 'Review symptoms and vitals, select or type a diagnosis, and play instructions for the patient.') }}
 
-<!-- Step 1: Patient Selection & Clinical Input -->
+<!-- Persistent Stepper Bar -->
+<div class="mb-5 space-y-3">
+  <nav class="flex items-center justify-between bg-white rounded-2xl border border-slate-200 p-1.5 shadow-sm text-xs font-bold overflow-x-auto" aria-label="Workflow Stages">
+    <a id="stepIntake" href="/translator" class="flex-1 min-w-[70px] py-2 px-1.5 text-center rounded-xl transition flex items-center justify-center text-slate-500 hover:text-ink">
+      1. Intake
+    </a>
+    <span class="text-slate-300">›</span>
+    <a id="stepTriage" href="/triage" class="flex-1 min-w-[70px] py-2 px-1.5 text-center rounded-xl transition flex items-center justify-center text-slate-500 hover:text-ink">
+      2. Triage
+    </a>
+    <span class="text-slate-300">›</span>
+    <a id="stepDiagnosis" href="/diagnosis" class="flex-1 min-w-[75px] py-2 px-1.5 text-center rounded-xl bg-brand text-white shadow-sm flex items-center justify-center">
+      3. Diagnosis
+    </a>
+    <span class="text-slate-300">›</span>
+    <a id="stepReferral" href="/referral" class="flex-1 min-w-[70px] py-2 px-1.5 text-center rounded-xl transition flex items-center justify-center text-slate-500 hover:text-ink">
+      4. Referral
+    </a>
+  </nav>
+
+  <!-- Live Active Patient Context Banner -->
+  <div id="activePatientBanner" class="hidden bg-white rounded-2xl border border-slate-200 p-3.5 shadow-sm transition">
+    <div class="flex items-center justify-between">
+      <div class="flex items-center gap-2.5 min-w-0">
+        <div id="bannerAvatar" class="w-9 h-9 rounded-full bg-brand-soft text-brand font-bold flex items-center justify-center flex-shrink-0 text-sm">
+          P
+        </div>
+        <div class="min-w-0">
+          <div class="flex items-center gap-2">
+            <h3 id="bannerPatientName" class="font-bold text-sm text-ink truncate">Patient</h3>
+            <span id="bannerHospitalId" class="hidden text-[10px] font-mono px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 font-bold"></span>
+          </div>
+          <p id="bannerPatientMeta" class="text-xs text-slate-500 truncate"></p>
+        </div>
+      </div>
+      <span id="bannerTriageTier" class="hidden text-xs font-bold px-2.5 py-1 rounded-full uppercase flex-shrink-0"></span>
+    </div>
+  </div>
+</div>
+
+<!-- 1. Patient Picker -->
 <div class="space-y-6">
   <div class="bg-white rounded-2xl border border-slate-200 p-4 space-y-3">
     <h2 class="text-sm font-bold text-slate-500">1. Patient</h2>
     <div id="patientPicker"></div>
   </div>
 
+  <!-- 2. Symptoms & Vitals Input -->
   <div class="bg-white rounded-2xl border border-slate-200 p-4 space-y-4">
     <h2 class="text-sm font-bold text-slate-500">2. Symptoms & Clinical Notes</h2>
     <label for="symptomsInput" class="sr-only">Symptoms description</label>
@@ -20,7 +61,7 @@
       class="w-full p-3.5 rounded-xl border border-slate-300 bg-white text-base text-ink focus:border-brand focus:ring-1 focus:ring-brand"></textarea>
 
     <div>
-      <p class="text-xs font-bold text-slate-400 mb-2 uppercase tracking-wider">Vitals (Optional / Pre-filled)</p>
+      <p class="text-xs font-bold text-slate-400 mb-2 uppercase tracking-wider">Vitals (Pre-filled from Triage/Intake)</p>
       <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-sm">
         <div>
           <label for="tempInput" class="text-xs text-slate-500">Temp (°C)</label>
@@ -47,7 +88,7 @@
   </div>
 </div>
 
-<!-- Step 2: Diagnostic Options + Custom Input -->
+<!-- 3. Diagnostic Results & Custom Diagnosis -->
 <div id="resultsArea" class="hidden mt-6 space-y-6">
   <div class="bg-surface rounded-2xl border border-brand/30 p-4 space-y-4">
     <div class="flex items-center justify-between pb-2 border-b border-brand/20">
@@ -60,17 +101,17 @@
     <p id="reasoningText" class="text-sm text-ink leading-relaxed"></p>
 
     <div>
-      <p class="text-xs font-bold text-slate-500 mb-2 uppercase tracking-wider">Select the verified diagnosis:</p>
+      <p class="text-xs font-bold text-slate-500 mb-2 uppercase tracking-wider">Select verified diagnosis:</p>
       <div id="optionsList" class="space-y-2"></div>
 
-      <!-- Custom Diagnosis Input (When AI options are incorrect) -->
+      <!-- Custom Diagnosis Input -->
       <div class="mt-3 pt-3 border-t border-slate-200">
         <label class="flex items-start gap-3 p-3 rounded-xl border border-slate-200 hover:border-brand cursor-pointer transition bg-white">
           <input type="radio" name="diagnosisOption" value="__custom__" id="radioCustom" class="mt-1 w-5 h-5 accent-brand">
           <div class="flex-1 min-w-0">
             <span class="font-bold text-sm text-ink block mb-1">Other / Input Custom Diagnosis</span>
-            <input type="text" id="customDiagnosisInput" placeholder="Type your diagnosis here if AI options are incorrect..."
-              class="w-full min-h-11 px-3.5 rounded-xl border border-slate-300 text-sm bg-white focus:border-brand focus:ring-1 focus:ring-brand" disabled>
+            <input type="text" id="customDiagnosisInput" placeholder="Type custom diagnosis if options above are incorrect..."
+              class="w-full min-h-11 px-3.5 rounded-xl border border-slate-300 text-sm bg-white focus:border-brand" disabled>
           </div>
         </label>
       </div>
@@ -87,7 +128,7 @@
     </button>
   </div>
 
-  <!-- Step 3: Patient Instructions Audio Readout Bar -->
+  <!-- 4. Patient Instructions Audio Bar -->
   <div id="instructionBarArea" class="hidden bg-white rounded-2xl border-2 border-info/40 p-4 space-y-4">
     <div class="flex items-center justify-between pb-2 border-b border-slate-100">
       <h3 class="font-bold text-ink text-sm flex items-center gap-2">
@@ -112,7 +153,6 @@
       </button>
     </div>
 
-    <!-- Navigation Next Steps -->
     <div class="pt-3 border-t border-slate-100 flex gap-2">
       <a id="goReferralBtn" href="/referral" class="flex-1 min-h-12 bg-danger text-white rounded-xl font-bold flex items-center justify-center text-sm hover:bg-danger-dark transition">
         Refer to Hospital
@@ -130,10 +170,53 @@
 const $ = (id) => document.getElementById(id);
 const show = (id, on = true) => $(id).classList.toggle('hidden', !on);
 
-const picker = new SH.PatientPicker($('patientPicker'));
-let encounterId = null;
+let currentEncounterId = null;
+const picker = new SH.PatientPicker($('patientPicker'), {
+  onChange: (p) => updatePatientBanner(p)
+});
 
-// Preload encounter if passed in URL
+function updatePatientBanner(patient, tier = null) {
+  if (!patient || !patient.id) {
+    show('activePatientBanner', false);
+    return;
+  }
+  show('activePatientBanner', true);
+  $('bannerPatientName').textContent = patient.full_name;
+  $('bannerAvatar').textContent = (patient.full_name || 'P')[0].toUpperCase();
+
+  if (patient.hospital_id) {
+    $('bannerHospitalId').textContent = `ID: ${patient.hospital_id}`;
+    show('bannerHospitalId', true);
+  } else {
+    show('bannerHospitalId', false);
+  }
+
+  const parts = [];
+  if (patient.age_years) parts.push(`${patient.age_years} yrs`);
+  if (patient.sex) parts.push(patient.sex === 'F' ? 'Female' : 'Male');
+  if (patient.phone) parts.push(patient.phone);
+  $('bannerPatientMeta').textContent = parts.join(' · ');
+
+  if (tier) {
+    const tb = $('bannerTriageTier');
+    tb.textContent = tier;
+    show('bannerTriageTier', true);
+    if (tier === 'RED') tb.className = 'text-xs font-bold px-2.5 py-1 rounded-full uppercase bg-danger-soft text-danger-dark border border-danger/30';
+    else if (tier === 'YELLOW') tb.className = 'text-xs font-bold px-2.5 py-1 rounded-full uppercase bg-warn-soft text-warn-dark border border-warn/30';
+    else tb.className = 'text-xs font-bold px-2.5 py-1 rounded-full uppercase bg-brand-soft text-brand-dark border border-brand/30';
+  }
+
+  updateStepperLinks(patient.id, currentEncounterId);
+}
+
+function updateStepperLinks(patientId, encId) {
+  const q = `?patient_id=${encodeURIComponent(patientId || '')}&encounter_id=${encodeURIComponent(encId || '')}`;
+  $('stepIntake').href = '/translator' + q;
+  $('stepTriage').href = '/triage' + q;
+  $('stepDiagnosis').href = '/diagnosis' + q;
+  $('stepReferral').href = '/referral' + q;
+}
+
 (async function init() {
   const params = new URLSearchParams(window.location.search);
   const pId = params.get('patient_id');
@@ -143,10 +226,12 @@ let encounterId = null;
     try {
       const p = await SH.api(`/api/patients/${encodeURIComponent(pId)}`);
       picker.setPatient(p);
+      updatePatientBanner(p);
     } catch (_) {}
   }
+
   if (eId) {
-    encounterId = eId;
+    currentEncounterId = eId;
     try {
       const enc = await SH.api(`/api/encounter/${encodeURIComponent(eId)}`);
       if (enc.vitals) {
@@ -158,17 +243,20 @@ let encounterId = null;
       if (enc.statement && !$('symptomsInput').value) {
         $('symptomsInput').value = enc.statement;
       }
+      if (enc.triage_tier) {
+        updatePatientBanner(picker.value, enc.triage_tier);
+      }
+      updateStepperLinks(pId, currentEncounterId);
     } catch (_) {}
   }
 })();
 
-// Analyze Symptoms
 $('analyzeBtn').addEventListener('click', async (e) => {
   const patient = picker.value;
   if (!patient || !patient.id) return picker.require();
 
   const symptoms = $('symptomsInput').value.trim();
-  if (!symptoms) return SH.toast('Please describe the symptoms first.', 'error');
+  if (!symptoms) return SH.toast('Please describe symptoms first.', 'error');
 
   const vitals = {
     temp: $('tempInput').value,
@@ -182,14 +270,15 @@ $('analyzeBtn').addEventListener('click', async (e) => {
       SH.api('/api/diagnosis', {
         json: {
           patient_id: patient.id,
-          encounter_id: encounterId,
+          encounter_id: currentEncounterId,
           symptoms,
           ...vitals
         }
       })
     );
 
-    encounterId = data.encounter_id;
+    currentEncounterId = data.encounter_id;
+    updateStepperLinks(patient.id, currentEncounterId);
     renderOptions(data);
   } catch (err) {
     SH.toast(err.message, 'error');
@@ -197,7 +286,7 @@ $('analyzeBtn').addEventListener('click', async (e) => {
 });
 
 function renderOptions(data) {
-  $('reasoningText').textContent = data.reasoning || 'Diagnostic assessment based on symptoms and vitals.';
+  $('reasoningText').textContent = data.reasoning || 'Diagnostic assessment based on symptoms.';
   $('sourceRef').textContent = data.source_reference || 'Clinical STG';
 
   const list = data.options || [];
@@ -208,18 +297,14 @@ function renderOptions(data) {
     </label>
   `).join('');
 
-  // Handle radio toggle between AI options and Custom Input
   document.querySelectorAll('input[name="diagnosisOption"]').forEach(r => {
     r.addEventListener('change', (e) => {
       const isCustom = e.target.value === '__custom__';
       $('customDiagnosisInput').disabled = !isCustom;
-      if (isCustom) {
-        $('customDiagnosisInput').focus();
-      }
+      if (isCustom) $('customDiagnosisInput').focus();
     });
   });
 
-  // Clicking into the custom input automatically selects its radio button
   $('customDiagnosisInput').addEventListener('focus', () => {
     $('radioCustom').checked = true;
     $('customDiagnosisInput').disabled = false;
@@ -229,7 +314,6 @@ function renderOptions(data) {
   $('resultsArea').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
-// Save Confirmed Diagnosis
 $('saveDiagnosisBtn').addEventListener('click', async (e) => {
   const selectedRadio = document.querySelector('input[name="diagnosisOption"]:checked');
   if (!selectedRadio) return SH.toast('Select a diagnosis or type a custom one.', 'error');
@@ -243,10 +327,10 @@ $('saveDiagnosisBtn').addEventListener('click', async (e) => {
   const medications = $('medicationsInput').value.trim();
 
   try {
-    const data = await SH.busy(e.currentTarget, 'Saving diagnosis', () =>
+    await SH.busy(e.currentTarget, 'Saving diagnosis', () =>
       SH.api('/api/diagnosis', {
         json: {
-          encounter_id: encounterId,
+          encounter_id: currentEncounterId,
           selected_diagnosis: finalDiagnosis,
           medications
         }
@@ -255,32 +339,28 @@ $('saveDiagnosisBtn').addEventListener('click', async (e) => {
 
     SH.toast('Diagnosis recorded successfully.', 'success');
 
-    // Populate draft instructions for the patient
     const draft = medications
-      ? `Take your medication as directed: ${medications}. Get plenty of rest and drink clean water. Return immediately if you notice high fever or severe pain.`
-      : `Rest well, stay hydrated, and return to the clinic immediately if your condition worsens.`;
+      ? `Take your medication as directed: ${medications}. Rest well and drink clean fluids. Return immediately if you notice danger signs.`
+      : `Rest well, drink clean fluids, and return immediately if your symptoms worsen.`;
     $('instructionText').value = draft;
 
-    // Show Audio Readout Bar
     show('instructionBarArea', true);
-    $('goReferralBtn').href = `/referral?patient_id=${picker.value.id}&encounter_id=${encounterId}`;
+    const q = `?patient_id=${encodeURIComponent(picker.value.id)}&encounter_id=${encodeURIComponent(currentEncounterId)}`;
+    $('goReferralBtn').href = '/referral' + q;
     $('instructionBarArea').scrollIntoView({ behavior: 'smooth', block: 'center' });
   } catch (err) {
     SH.toast(err.message, 'error');
   }
 });
 
-// Play Audio Instructions to Patient
 $('playInstructionBtn').addEventListener('click', async (e) => {
   const text = $('instructionText').value.trim();
   const language = $('instructionLang').value;
-  if (!text) return SH.toast('Type instructions to speak first.', 'error');
+  if (!text) return SH.toast('Type instructions first.', 'error');
 
   try {
     const data = await SH.busy(e.currentTarget, 'Translating & speaking', () =>
-      SH.api('/api/tts_instruction', {
-        json: { text, language }
-      })
+      SH.api('/api/tts_instruction', { json: { text, language } })
     );
     await new Audio(data.audio_url).play();
   } catch (err) {
