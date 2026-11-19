@@ -1,108 +1,226 @@
 {% extends "base.html" %}
 {% from "_macros.html" import icon, page_header %}
 {% set active = 'referral' %}
-{% block title %}Generate referral · SmartHealth{% endblock %}
+{% block title %}Patient referral · SmartHealth{% endblock %}
 
 {% block content %}
-<div class="no-print">{{ page_header('Generate referral', '/dashboard', 'Send the patient to another facility with a code and QR.') }}</div>
+{{ page_header('Patient referral', '/dashboard', 'Transfer patient to a higher facility with a unique tracking code.') }}
 
-<!-- Form -->
-<div id="referralForm" class="space-y-4 mb-6">
+<!-- Persistent Stepper Bar -->
+<div class="mb-5 space-y-3">
+  <nav class="flex items-center justify-between bg-white rounded-2xl border border-slate-200 p-1.5 shadow-sm text-xs font-bold overflow-x-auto" aria-label="Workflow Stages">
+    <a id="stepIntake" href="/translator" class="flex-1 min-w-[70px] py-2 px-1.5 text-center rounded-xl transition flex items-center justify-center text-slate-500 hover:text-ink">
+      1. Intake
+    </a>
+    <span class="text-slate-300">›</span>
+    <a id="stepTriage" href="/triage" class="flex-1 min-w-[70px] py-2 px-1.5 text-center rounded-xl transition flex items-center justify-center text-slate-500 hover:text-ink">
+      2. Triage
+    </a>
+    <span class="text-slate-300">›</span>
+    <a id="stepDiagnosis" href="/diagnosis" class="flex-1 min-w-[75px] py-2 px-1.5 text-center rounded-xl transition flex items-center justify-center text-slate-500 hover:text-ink">
+      3. Diagnosis
+    </a>
+    <span class="text-slate-300">›</span>
+    <a id="stepReferral" href="/referral" class="flex-1 min-w-[70px] py-2 px-1.5 text-center rounded-xl bg-brand text-white shadow-sm flex items-center justify-center">
+      4. Referral
+    </a>
+  </nav>
+
+  <!-- Live Active Patient Context Banner -->
+  <div id="activePatientBanner" class="hidden bg-white rounded-2xl border border-slate-200 p-3.5 shadow-sm transition">
+    <div class="flex items-center justify-between">
+      <div class="flex items-center gap-2.5 min-w-0">
+        <div id="bannerAvatar" class="w-9 h-9 rounded-full bg-brand-soft text-brand font-bold flex items-center justify-center flex-shrink-0 text-sm">
+          P
+        </div>
+        <div class="min-w-0">
+          <div class="flex items-center gap-2">
+            <h3 id="bannerPatientName" class="font-bold text-sm text-ink truncate">Patient</h3>
+            <span id="bannerHospitalId" class="hidden text-[10px] font-mono px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 font-bold"></span>
+          </div>
+          <p id="bannerPatientMeta" class="text-xs text-slate-500 truncate"></p>
+        </div>
+      </div>
+      <span id="bannerTriageTier" class="hidden text-xs font-bold px-2.5 py-1 rounded-full uppercase flex-shrink-0"></span>
+    </div>
+  </div>
+</div>
+
+<!-- 1. Patient Picker -->
+<div class="bg-white rounded-2xl border border-slate-200 p-4 space-y-3 mb-6">
+  <h2 class="text-sm font-bold text-slate-500">1. Patient</h2>
   <div id="patientPicker"></div>
-  <div class="bg-white p-4 rounded-xl border border-slate-200 space-y-4">
+</div>
+
+<!-- 2. Destination & Referral Details -->
+<form id="referralForm" class="bg-white rounded-2xl border border-slate-200 p-4 space-y-4 mb-6">
+  <h2 class="text-sm font-bold text-slate-500">2. Destination & Clinical Reason</h2>
 
   <div>
-    <label for="center_select" class="text-sm font-semibold text-slate-600 block mb-1">Destination center *</label>
-    <select id="center_select" class="w-full min-h-12 px-3 rounded-lg border border-slate-300 bg-surface text-base font-semibold">
-      <option value="" disabled selected>Loading centers...</option>
+    <label for="centerSelect" class="text-xs font-bold text-slate-500 uppercase tracking-wider block mb-1">Destination Facility</label>
+    <select id="centerSelect" required class="w-full min-h-12 px-3.5 rounded-xl border border-slate-300 text-sm bg-white font-semibold">
+      <option value="">Select hospital...</option>
     </select>
   </div>
 
   <div>
-    <label for="reason" class="text-sm font-semibold text-slate-600 block mb-2">Reason for referral *</label>
-    <div class="flex flex-wrap gap-2 mb-3" role="group" aria-label="Quick reasons">
-      <button type="button" data-tag="Obstructed labor" class="tag px-3.5 min-h-10 bg-danger-soft text-danger-dark text-sm font-semibold rounded-full border border-danger/20 hover:bg-red-100">Obstructed labor</button>
-      <button type="button" data-tag="Severe bleeding" class="tag px-3.5 min-h-10 bg-danger-soft text-danger-dark text-sm font-semibold rounded-full border border-danger/20 hover:bg-red-100">Severe bleeding</button>
-      <button type="button" data-tag="High BP / pre-eclampsia" class="tag px-3.5 min-h-10 bg-warn-soft text-warn-dark text-sm font-semibold rounded-full border border-warn/30 hover:bg-amber-100">High BP</button>
-      <button type="button" data-tag="Facility at capacity" class="tag px-3.5 min-h-10 bg-slate-100 text-slate-700 text-sm font-semibold rounded-full border border-slate-300 hover:bg-slate-200">Center full</button>
-    </div>
-    <textarea id="reason" rows="3" maxlength="1000" placeholder="Describe the reason for referral"
-              class="w-full px-3 py-2 rounded-lg border border-slate-300 bg-surface text-base"></textarea>
+    <label for="reasonInput" class="text-xs font-bold text-slate-500 uppercase tracking-wider block mb-1">Clinical Reason for Transfer</label>
+    <textarea id="reasonInput" rows="3" required placeholder="State clinical findings, vitals concerns, or suspected diagnosis..."
+      class="w-full p-3.5 rounded-xl border border-slate-300 text-sm bg-white text-ink"></textarea>
   </div>
 
-  <button id="generateBtn" class="w-full min-h-14 bg-ink text-white rounded-xl font-bold hover:bg-slate-800 transition">Generate referral and code</button>
+  <button type="submit" id="submitBtn" class="w-full min-h-14 bg-danger text-white rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-danger-dark transition">
+    {{ icon('share', 'h-5 w-5') }} Generate official referral code
+  </button>
+</form>
+
+<!-- 3. Generated Referral Ticket Card -->
+<div id="ticketCard" class="hidden bg-white rounded-2xl border-2 border-brand p-5 text-center space-y-4 shadow-md">
+  <span class="inline-block px-3 py-1 bg-brand-soft text-brand-dark rounded-full text-xs font-black uppercase tracking-wider">
+    Official Referral Active
+  </span>
+
+  <div>
+    <p class="text-xs font-bold text-slate-500 uppercase">Referral Code</p>
+    <div id="codeDisplay" class="text-3xl font-mono font-black text-brand tracking-widest py-2 bg-brand-soft rounded-xl my-1">
+      ------
+    </div>
+  </div>
+
+  <img id="qrDisplay" src="" alt="Referral QR Code" class="mx-auto w-36 h-36 rounded-xl border border-slate-200">
+  <p id="destDisplay" class="text-xs font-bold text-slate-700"></p>
+
+  <div class="flex gap-2 pt-2">
+    <button id="printBtn" class="flex-1 min-h-11 bg-slate-100 text-ink rounded-xl font-bold text-xs hover:bg-slate-200 transition">
+      Print Slip
+    </button>
+    <a href="/dashboard" class="flex-1 min-h-11 bg-ink text-white rounded-xl font-bold text-xs flex items-center justify-center hover:bg-slate-800 transition">
+      Done & Dashboard
+    </a>
   </div>
 </div>
-
-<!-- Result -->
-<section id="referralCard" class="hidden bg-white p-6 rounded-2xl border-2 border-dashed border-slate-300 text-center space-y-4" aria-live="polite">
-  <p class="text-sm font-semibold text-slate-500">Referral code</p>
-  <h2 id="displayCode" class="text-4xl font-black tracking-wider tabular-nums"></h2>
-  <img id="qrImg" class="mx-auto w-44 h-44 rounded-lg border border-slate-200 bg-white p-2 hidden" alt="QR code of the referral code">
-
-  <dl class="text-left bg-surface p-4 rounded-xl space-y-2 text-sm">
-    <div class="flex gap-2"><dt class="font-semibold text-slate-500 w-24 shrink-0">Patient</dt><dd id="displayName" class="font-bold"></dd></div>
-    <div id="hidRow" class="hidden flex gap-2"><dt class="font-semibold text-slate-500 w-24 shrink-0">Sender ID</dt><dd id="displayHid" class="font-bold"></dd></div>
-    <div class="flex gap-2"><dt class="font-semibold text-slate-500 w-24 shrink-0">Destination</dt><dd id="displayFacility" class="font-bold"></dd></div>
-    <div class="flex gap-2"><dt class="font-semibold text-slate-500 w-24 shrink-0">Reason</dt><dd id="displayReason" class="font-bold"></dd></div>
-  </dl>
-
-  <div class="grid grid-cols-2 gap-2 no-print">
-    <button id="printBtn" class="min-h-12 bg-brand text-white rounded-xl font-bold hover:bg-brand-dark transition flex items-center justify-center gap-2">{{ icon('print') }}Print or save PDF</button>
-    <button id="shareBtn" class="min-h-12 bg-ink text-white rounded-xl font-bold hover:bg-slate-800 transition flex items-center justify-center gap-2">{{ icon('share') }}Share code</button>
-  </div>
-  <a href="/dashboard" class="block text-sm font-bold text-slate-500 hover:text-ink min-h-11 leading-[2.75rem] no-print">Back to ledger</a>
-</section>
 {% endblock %}
 
 {% block scripts %}
 <script>
 const $ = (id) => document.getElementById(id);
-const params = new URLSearchParams(location.search);
-let encounterId = params.get('encounter_id');
-let last = null;
-const picker = new SH.PatientPicker($('patientPicker'));
-if (encounterId) {
-  SH.api(`/api/encounter/${encodeURIComponent(encounterId)}`, { method: 'GET' }).then((e) => {
-    if (e.patient) picker.setPatient(e.patient); else picker.suggest(e.patient_name);
-    if (!$('reason').value) $('reason').value = [e.diagnosis, e.conclusion].find(Boolean) || '';
-  }).catch(() => { encounterId = null; });
+const show = (id, on = true) => $(id).classList.toggle('hidden', !on);
+
+let currentEncounterId = null;
+const picker = new SH.PatientPicker($('patientPicker'), {
+  onChange: (p) => updatePatientBanner(p)
+});
+
+function updatePatientBanner(patient, tier = null) {
+  if (!patient || !patient.id) {
+    show('activePatientBanner', false);
+    return;
+  }
+  show('activePatientBanner', true);
+  $('bannerPatientName').textContent = patient.full_name;
+  $('bannerAvatar').textContent = (patient.full_name || 'P')[0].toUpperCase();
+
+  if (patient.hospital_id) {
+    $('bannerHospitalId').textContent = `ID: ${patient.hospital_id}`;
+    show('bannerHospitalId', true);
+  } else {
+    show('bannerHospitalId', false);
+  }
+
+  const parts = [];
+  if (patient.age_years) parts.push(`${patient.age_years} yrs`);
+  if (patient.sex) parts.push(patient.sex === 'F' ? 'Female' : 'Male');
+  if (patient.phone) parts.push(patient.phone);
+  $('bannerPatientMeta').textContent = parts.join(' · ');
+
+  if (tier) {
+    const tb = $('bannerTriageTier');
+    tb.textContent = tier;
+    show('bannerTriageTier', true);
+    if (tier === 'RED') tb.className = 'text-xs font-bold px-2.5 py-1 rounded-full uppercase bg-danger-soft text-danger-dark border border-danger/30';
+    else if (tier === 'YELLOW') tb.className = 'text-xs font-bold px-2.5 py-1 rounded-full uppercase bg-warn-soft text-warn-dark border border-warn/30';
+    else tb.className = 'text-xs font-bold px-2.5 py-1 rounded-full uppercase bg-brand-soft text-brand-dark border border-brand/30';
+  }
+
+  updateStepperLinks(patient.id, currentEncounterId);
 }
 
-SH.api('/api/centers', { method: 'GET' }).then((centers) => {
-  $('center_select').innerHTML = '<option value="" disabled selected>Select a destination center</option>' +
-    centers.map((c) => `<option value="${SH.esc(c.id)}">${SH.esc(c.name)} (${SH.esc(c.location)})</option>`).join('');
-}).catch((err) => { $('center_select').innerHTML = '<option value="" disabled selected>Could not load centers</option>'; SH.toast(err.message, 'error'); });
+function updateStepperLinks(patientId, encId) {
+  const q = `?patient_id=${encodeURIComponent(patientId || '')}&encounter_id=${encodeURIComponent(encId || '')}`;
+  $('stepIntake').href = '/translator' + q;
+  $('stepTriage').href = '/triage' + q;
+  $('stepDiagnosis').href = '/diagnosis' + q;
+  $('stepReferral').href = '/referral' + q;
+}
 
-document.querySelectorAll('.tag').forEach((b) => b.addEventListener('click', () => {
-  const r = $('reason'); const tag = b.dataset.tag;
-  if (!r.value.includes(tag)) r.value += (r.value ? ', ' : '') + tag;
-}));
-
-$('generateBtn').addEventListener('click', async (e) => {
-  const patient = picker.value, center_id = $('center_select').value, reason = $('reason').value.trim();
-  if (!patient) return picker.require();
-  if (!center_id || !reason) return SH.toast('Choose a destination and give a reason.', 'error');
+(async function init() {
+  // Load facility list
   try {
-    const data = await SH.busy(e.currentTarget, 'Generating', () =>
-      SH.api('/api/referral', { json: { patient_id: patient.id, center_id, reason, encounter_id: encounterId } }));
-    last = data;
-    $('referralForm').classList.add('hidden');
-    $('referralCard').classList.remove('hidden');
-    $('displayCode').textContent = data.referral_code;
-    $('displayName').textContent = data.patient_name;
-    const hid = data.patient && data.patient.hospital_id;
-    $('hidRow').classList.toggle('hidden', !hid); if (hid) $('displayHid').textContent = hid;
-    $('displayFacility').textContent = data.facility;
-    $('displayReason').textContent = data.reason;
-    $('qrImg').src = data.referral_qr; $('qrImg').classList.remove('hidden');
-    if (!navigator.share) $('shareBtn').classList.add('hidden');
-  } catch (err) { SH.toast(err.message, 'error'); }
+    const centers = await SH.api('/api/centers');
+    $('centerSelect').innerHTML = '<option value="">Select hospital...</option>' +
+      centers.map(c => `<option value="${c.id}">${SH.esc(c.name)} (${SH.esc(c.location || 'General')})</option>`).join('');
+  } catch (_) {}
+
+  const params = new URLSearchParams(window.location.search);
+  const pId = params.get('patient_id');
+  const eId = params.get('encounter_id');
+
+  if (pId) {
+    try {
+      const p = await SH.api(`/api/patients/${encodeURIComponent(pId)}`);
+      picker.setPatient(p);
+      updatePatientBanner(p);
+    } catch (_) {}
+  }
+
+  if (eId) {
+    currentEncounterId = eId;
+    try {
+      const enc = await SH.api(`/api/encounter/${encodeURIComponent(eId)}`);
+      if (enc.triage_tier) {
+        updatePatientBanner(picker.value, enc.triage_tier);
+      }
+      if (enc.diagnosis && !$('reasonInput').value) {
+        $('reasonInput').value = `Suspected: ${enc.diagnosis}`;
+      } else if (enc.triage_tier && !$('reasonInput').value) {
+        $('reasonInput').value = `Triage Risk: ${enc.triage_tier}`;
+      }
+      updateStepperLinks(pId, currentEncounterId);
+    } catch (_) {}
+  }
+})();
+
+$('referralForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const patient = picker.value;
+  if (!patient || !patient.id) return picker.require();
+
+  const centerId = $('centerSelect').value;
+  const reason = $('reasonInput').value.trim();
+
+  try {
+    const resp = await SH.busy($('submitBtn'), 'Generating code', () =>
+      SH.api('/api/referral', {
+        json: {
+          patient_id: patient.id,
+          encounter_id: currentEncounterId,
+          center_id: centerId,
+          reason
+        }
+      })
+    );
+
+    $('codeDisplay').textContent = resp.referral_code;
+    $('qrDisplay').src = resp.referral_qr;
+    $('destDisplay').textContent = `Referred to: ${resp.facility}`;
+
+    show('ticketCard', true);
+    $('ticketCard').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  } catch (err) {
+    SH.toast(err.message, 'error');
+  }
 });
 
 $('printBtn').addEventListener('click', () => window.print());
-$('shareBtn').addEventListener('click', () => last && navigator.share({
-  title: 'SmartHealth referral', text: `Referral for ${last.patient_name} to ${last.facility}. Code: ${last.referral_code}`,
-}).catch(() => {}));
 </script>
 {% endblock %}
