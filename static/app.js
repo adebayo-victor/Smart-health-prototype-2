@@ -288,20 +288,85 @@
       if (this.patient) this.paint(); else this.$('[data-search]').classList.remove('hidden');
     }
 
-    async save() {
-      const f = (n) => this.$(`[data-f="${n}"]`).value;
-      const preg = f('is_pregnant');
-      const json = { full_name: f('full_name'), phone: f('phone'), age_years: f('age_years'), sex: f('sex'), hospital_id: f('hospital_id'),
-        village_lga: f('village_lga'), next_of_kin_name: f('next_of_kin_name'), next_of_kin_phone: f('next_of_kin_phone'),
-        is_pregnant: f('sex') === 'F' ? (preg === 'yes' ? true : preg === 'no' ? false : null) : null, allergies: f('allergies') };
+    async save(skipCheck = false) {
+      const data = {
+        full_name: this.$('name').value.trim(),
+        phone: this.$('phone').value.trim() || null,
+        age_years: this.$('age').value || null,
+        sex: this.$('sex').value || null,
+        hospital_id: this.$('hospitalId').value.trim() || null,
+        village_lga: this.$('village').value.trim() || null,
+        next_of_kin_name: this.$('nokName').value.trim() || null,
+        next_of_kin_phone: this.$('nokPhone').value.trim() || null,
+        is_pregnant: this.$('pregnant').checked,
+        allergies: this.$('allergies').value.trim() || null,
+      };
+
+      if (!data.full_name) {
+        return this.showError('Enter patient full name.');
+      }
+
+      // Check duplicates first unless explicitly bypassed
+      if (!skipCheck) {
+        try {
+          const check = await SH.api('/api/patients/check-duplicates', { json: data });
+          if (check.matches && check.matches.length > 0) {
+            return this.renderDuplicateWarning(check.matches, data);
+          }
+        } catch (_) {}
+      }
+
       try {
-        const p = await busy(this.$('[data-form-save]'), 'Saving', () =>
-          this.editing ? api(`/api/patients/${this.editing.id}`, { method: 'PATCH', json }) : api('/api/patients', { json }));
-        this.select(p); this.search('');
-        toast(this.editing ? 'Details updated.' : 'Patient added.', 'success');
-      } catch (err) { const e = this.$('[data-form-error]'); e.textContent = err.message; e.classList.remove('hidden'); }
+        const p = await SH.busy(this.$('saveBtn'), 'Saving...', () =>
+          SH.api('/api/patients', { json: data })
+        );
+        this.setPatient(p);
+        this.closeModal();
+        SH.toast('Patient registered successfully.', 'success');
+      } catch (err) {
+        this.showError(err.message);
+      }
     }
-  }
+
+    renderDuplicateWarning(matches, pendingData) {
+      const box = this.$('modalError') || this.createErrorBox();
+      box.className = 'p-3.5 rounded-xl bg-warn-soft border border-warn/40 text-warn-dark text-xs space-y-2';
+      box.innerHTML = `
+        <p class="font-black uppercase tracking-wide">⚠️ Possible Existing Patient Found</p>
+        <div class="space-y-1.5">
+          ${matches.map(m => `
+            <div class="p-2 bg-white rounded-lg border border-warn/30 flex items-center justify-between text-ink">
+              <div>
+                <strong class="block">${SH.esc(m.full_name)}</strong>
+                <span class="text-slate-500">${m.age_years ? m.age_years + ' yrs · ' : ''}${m.phone || 'No phone'} (${SH.esc(m.match_reason || 'Match')})</span>
+              </div>
+              <button type="button" class="select-dupe-btn px-2.5 py-1.5 bg-brand text-white rounded-md font-bold text-[11px]" data-id="${m.id}">
+                Use This
+              </button>
+            </div>
+          `).join('')}
+        </div>
+        <button type="button" id="saveAnywayBtn" class="w-full min-h-9 bg-slate-200 text-ink rounded-lg font-bold hover:bg-slate-300 transition text-[11px]">
+          No, Save as New Patient Anyway
+        </button>
+      `;
+
+      box.querySelectorAll('.select-dupe-btn').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+          const id = e.currentTarget.dataset.id;
+          const chosen = matches.find(m => m.id == id);
+          if (chosen) {
+            this.setPatient(chosen);
+            this.closeModal();
+            SH.toast(`Selected ${chosen.full_name}.`, 'info');
+          }
+        });
+      });
+
+      box.querySelector('#saveAnywayBtn').addEventListener('click', () => {
+        this.save(true); // Bypass check
+      });
+    }
 
   /** Online/offline pill in the header. */
   function watchConnection() {
