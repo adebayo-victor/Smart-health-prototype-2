@@ -1256,14 +1256,11 @@ def answer_patient(user_text, translated_text, past_memories, recent_chat, pendi
     pending_context = ""
     if pending_emergency and pending_emergency.get("active"):
         pending_context = f"""
-    ⚠️ ACTIVE INCOMPLETE EMERGENCY REFERRAL IN PROGRESS:
-    Earlier reported emergency: "{pending_emergency.get('reason')}".
-    We are still waiting for the patient's town/location to generate their hospital referral code.
-    - If the user's newest speech mentions where they are (town, city, area, landmark like 'Abeokuta', 'Odeda', 'Kano', 'Sabon Gari'):
-      Extract that exact location into "spoken_location".
-    - If the user does NOT mention their location yet:
-      1. Answer their immediate emotional or medical concern gently and calmly.
-      2. Set "is_emergency" = True and "spoken_location" = null.
+    ACTIVE EMERGENCY CONTEXT:
+    The patient reported an emergency: "{pending_emergency.get('reason')}".
+    We need their town/area to prepare a hospital referral.
+    - If the patient mentions where they are (town, city, area), extract it into "spoken_location".
+    - If not, answer their concern calmly, remind them this is an emergency, and ask what town/area they are in.
     """
 
     prompt = f"""
@@ -1287,14 +1284,17 @@ def answer_patient(user_text, translated_text, past_memories, recent_chat, pendi
 
     INSTRUCTIONS:
     1. Detect the language of the ORIGINAL QUESTION (Hausa, Nigerian Pidgin, or English).
-    2. Check if the user is giving their town, city, or area:
-       - If yes, return the city/area name in "spoken_location".
-    3. Evaluate if the patient is experiencing an EMERGENCY:
-       - If an emergency is detected or pending, mark "is_emergency" = True.
+    2. Formulate your medical answer in THAT EXACT SAME DETECTED LANGUAGE.
+       - If the user spoke English, reply ONLY in English.
+       - If the user spoke Nigerian Pidgin, reply ONLY in Pidgin.
+       - If the user spoke Hausa, reply ONLY in Hausa.
+       - NEVER mix languages in your reply.
+    3. If there is an emergency (or pending emergency) and the patient has not given their location yet, your answer in that same language must conclude by asking them to speak what town or area they are in right now so you can find the nearest hospital.
+    4. If the user is speaking their location/town/city, return it in "spoken_location".
 
-    Return ONLY valid JSON:
+    Return ONLY valid JSON in this exact format:
     {{
-      "answer_english": "The medical answer in simple English.",
+      "answer_english": "The medical answer in simple English (for our records).",
       "answer_local": "Your medical answer in the DETECTED language (Hausa, Pidgin, or English).",
       "detected_language": "Hausa" or "Pidgin" or "English",
       "keywords": ["word1", "word2"],
@@ -1308,9 +1308,9 @@ def answer_patient(user_text, translated_text, past_memories, recent_chat, pendi
     except Exception:
         logger.exception("Patient answer failed")
         res = {
-            "answer_english": "Please visit the nearest health clinic to have this checked immediately.",
-            "answer_local": "Don Allah je asibiti mafi kusa don a duba lafiyarka da gaggawa.",
-            "detected_language": "Hausa",
+            "answer_english": "Please visit the nearest health clinic immediately.",
+            "answer_local": "Please visit the nearest health clinic immediately.",
+            "detected_language": "English",
             "keywords": [],
             "is_emergency": bool(pending_emergency and pending_emergency.get("active")),
             "emergency_reason": pending_emergency.get("reason") if pending_emergency else None,
@@ -1323,24 +1323,6 @@ def answer_patient(user_text, translated_text, past_memories, recent_chat, pendi
         res["is_emergency"] = True
         if not res.get("emergency_reason"):
             res["emergency_reason"] = "Urgent clinical danger signs detected in speech."
-
-    # -------------------------------------------------------------------------
-    # GUARANTEE: Force the spoken audio to ask for their location out loud
-    # -------------------------------------------------------------------------
-    if res.get("is_emergency") and not res.get("spoken_location"):
-        lang = str(res.get("detected_language", "English")).lower()
-        if "haus" in lang:
-            loc_prompt = " Don Allah danna maballin ka fada min garin ko yankin da kake a yanzu, domin in samo maka asibiti mafi kusa."
-        elif "pidg" in lang:
-            loc_prompt = " Abeg hold the mic tell me which town or area you dey right now, make I find hospital for you quick-quick."
-        else:
-            loc_prompt = " Please hold the mic and tell me what town or area you are in right now, so I can find the nearest hospital for you."
-
-        # If the LLM didn't already include the question in the speech, append it to the spoken text!
-        current_speech = res.get("answer_local", "")
-        if not any(k in current_speech.lower() for k in ["which town", "what town", "wane gari", "which area", "tell me where"]):
-            res["answer_local"] = current_speech.rstrip() + loc_prompt
-            res["answer_english"] = (res.get("answer_english", "")).rstrip() + " Please tell me what town or area you are in right now so I can find the nearest hospital."
 
     return res
 
