@@ -24,7 +24,7 @@
 
   <!-- Chat Screen -->
   <section id="chatScreen" class="hidden flex-col flex-1 min-h-0">
-    <!-- Floating Active Referral Pill (Appears at top if code exists) -->
+    <!-- Floating Active Referral Pill -->
     <div id="floatingTicketPill" class="hidden bg-danger text-white px-4 py-2 flex items-center justify-between text-xs font-bold shadow-md cursor-pointer z-20">
       <span class="flex items-center gap-1.5 truncate">
         {{ icon('alert', 'h-4 w-4 flex-shrink-0') }} Active Emergency Code: <strong id="pillCode" class="font-mono text-sm tracking-wider underline">------</strong>
@@ -32,7 +32,7 @@
       <span class="text-[11px] bg-white/20 px-2 py-0.5 rounded-full flex-shrink-0">View Ticket</span>
     </div>
 
-    <!-- Top Header -->
+    <!-- Header -->
     <div class="flex items-center gap-3 py-3 border-b border-slate-200">
       <div class="w-10 h-10 bg-brand rounded-full flex items-center justify-center">{{ icon('heart', 'h-5 w-5 text-white') }}</div>
       <div class="flex-1">
@@ -42,7 +42,7 @@
       <button id="changeNumber" class="min-h-11 px-2 text-sm font-semibold text-slate-500 hover:text-ink">Change number</button>
     </div>
 
-    <!-- Messages Container -->
+    <!-- Chat Messages Scroll Area -->
     <div id="chatMessages" class="flex-1 overflow-y-auto space-y-4 py-4 scroll-smooth" aria-live="polite">
       <div class="flex justify-start">
         <div class="max-w-[85%] bg-brand-soft border border-brand/20 rounded-2xl rounded-tl-none p-4 shadow-sm">
@@ -51,7 +51,7 @@
       </div>
     </div>
 
-    <!-- Hold-to-Talk Mic Controls -->
+    <!-- Hold to Talk Mic Area -->
     <div class="pt-3 pb-4 border-t border-slate-200 bg-white">
       <p id="statusText" class="text-center text-sm font-semibold text-slate-500 mb-3 h-5" role="status">Tap and hold to speak</p>
       <div class="flex justify-center">
@@ -66,7 +66,7 @@
     </div>
   </section>
 
-  <!-- Ticket Modal / Popup (When tapping floating pill) -->
+  <!-- Ticket Modal (When clicking floating pill) -->
   <div id="ticketModal" class="hidden fixed inset-0 bg-ink/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
     <div class="bg-white rounded-3xl p-6 max-w-sm w-full text-center space-y-3 shadow-2xl border-2 border-brand">
       <span class="inline-block px-3 py-1 bg-danger-soft text-danger-dark rounded-full text-xs font-black uppercase tracking-wider">
@@ -95,6 +95,37 @@ const recorder = new SH.Recorder();
 const clips = [];
 let phone = null, busy = false, current = null;
 let activeTicket = null;
+
+// ---- In-Memory Pending Referral State ----
+let pendingReferral = null;
+try {
+  const savedPending = sessionStorage.getItem('sh_pending_referral');
+  if (savedPending) pendingReferral = JSON.parse(savedPending);
+} catch (_) {}
+
+function setPendingReferral(reason) {
+  pendingReferral = { active: true, reason: reason, timestamp: Date.now() };
+  try { sessionStorage.setItem('sh_pending_referral', JSON.stringify(pendingReferral)); } catch (_) {}
+  showPendingBanner(true, reason);
+}
+
+function clearPendingReferral() {
+  pendingReferral = null;
+  try { sessionStorage.removeItem('sh_pending_referral'); } catch (_) {}
+  showPendingBanner(false);
+}
+
+function showPendingBanner(show, reason = '') {
+  let el = $('pendingEmergencyBanner');
+  if (!el && show) {
+    $('chatMessages').insertAdjacentHTML('afterbegin', `
+      <div id="pendingEmergencyBanner" class="p-2.5 mb-2 rounded-xl bg-warn-soft border border-warn/40 text-warn-dark text-xs flex items-center justify-between font-bold">
+        <span>⚠️ Emergency referral in progress: speak your area anytime to get your code</span>
+      </div>`);
+  } else if (el && !show) {
+    el.remove();
+  }
+}
 
 // ---- Storage & Floating Ticket ----
 function loadActiveTicket() {
@@ -133,7 +164,7 @@ async function pollTicketStatus() {
     const res = await SH.api(`/api/patient/referral_status?code=${encodeURIComponent(activeTicket.code)}`);
     if (res.status === 'fulfilled') {
       clearActiveTicket();
-      SH.toast('Your referral code was successfully ingested at the hospital.', 'success');
+      SH.toast('Your referral code was accepted at the hospital.', 'success');
     }
   } catch (_) {}
 }
@@ -146,6 +177,9 @@ function enter(number) {
   $('entryScreen').classList.add('hidden');
   $('chatScreen').classList.remove('hidden'); $('chatScreen').classList.add('flex');
   loadActiveTicket();
+  if (pendingReferral && pendingReferral.active) {
+    showPendingBanner(true, pendingReferral.reason);
+  }
 }
 $('entryForm').addEventListener('submit', (e) => {
   e.preventDefault();
@@ -193,15 +227,49 @@ async function release(e) {
   const form = new FormData();
   form.append('audio', clip.blob, clip.filename);
   form.append('phone_number', phone);
+
+  // Send incomplete pending referral if active in memory:
+  if (pendingReferral && pendingReferral.active) {
+    form.append('pending_emergency', JSON.stringify(pendingReferral));
+  }
+
   try {
     const d = await SH.api('/api/patient_voice', { form });
     addMessage(d.user_text, 'user');
     addMessage(d.ai_text_local, 'ai', d.audio_url);
     if (d.audio_url) play(d.audio_url);
 
-    // If emergency triggered: start location-aware referral card
-    if (d.emergency_alert && d.emergency_alert.is_emergency) {
-      appendLocationStep(d.emergency_alert.reason || 'Urgent symptom detected.');
+    // 1. If emergency detected without location, set pending in memory
+    if (d.emergency_alert && d.emergency_alert.is_emergency && !d.auto_referral) {
+      const reason = d.emergency_alert.reason || 'Urgent symptom detected.';
+      setPendingReferral(reason);
+      appendVoiceLocationStep(reason);
+    }
+
+    // 2. If the user spoke their location, auto-referral is generated and pending clears!
+    if (d.auto_referral) {
+      clearPendingReferral();
+
+      const ticketObj = {
+        code: d.auto_referral.code,
+        qr: d.auto_referral.qr,
+        hospitals: d.auto_referral.hospitals,
+        location: d.auto_referral.location
+      };
+      saveActiveTicket(ticketObj);
+
+      $('chatMessages').insertAdjacentHTML('beforeend', `
+        <div class="flex justify-start">
+          <div class="max-w-[85%] rounded-2xl rounded-tl-none p-4 bg-white border-2 border-brand text-ink text-center space-y-2.5 shadow-sm">
+            <span class="inline-block px-2.5 py-0.5 rounded-full bg-danger-soft text-danger-dark text-[11px] font-bold uppercase">Emergency Open Pass Generated</span>
+            <p class="text-xs font-bold text-slate-600">Show this code at any nearby hospital:</p>
+            <div class="text-2xl font-mono font-black text-brand tracking-widest bg-brand-soft py-1.5 rounded-xl">${SH.esc(d.auto_referral.code)}</div>
+            <img src="${d.auto_referral.qr}" alt="Referral QR" class="mx-auto w-32 h-32 rounded-lg border border-slate-200">
+            <p class="text-[11px] text-slate-600 font-medium">${SH.esc(d.auto_referral.hospitals)}</p>
+            <p class="text-[10px] text-slate-400">This code floats at the top of your screen until reception accepts it.</p>
+          </div>
+        </div>`);
+      $('chatMessages').scrollTop = $('chatMessages').scrollHeight;
     }
   } catch (err) {
     addMessage(err.message || "I'm sorry, I didn't catch that. Please try again.", 'ai');
@@ -243,98 +311,25 @@ function play(url) {
   current.play().catch(() => SH.toast('Tap Replay to hear the answer.', 'info'));
 }
 
-// ---- Step 1: Ask Location for Emergency Referral ----
-function appendLocationStep(reason) {
-  const cardId = 'loc_' + Date.now();
+// ---- Voice Location Prompt ----
+function appendVoiceLocationStep(reason) {
   $('chatMessages').insertAdjacentHTML('beforeend', `
-    <div id="${cardId}" class="flex justify-start">
-      <div class="max-w-[85%] rounded-2xl rounded-tl-none p-4 bg-danger-soft border-2 border-danger text-danger-dark space-y-3 shadow-sm">
+    <div class="flex justify-start">
+      <div class="max-w-[85%] rounded-2xl rounded-tl-none p-4 bg-danger-soft border-2 border-danger text-danger-dark space-y-2 shadow-sm animate-pulse">
         <p class="text-xs font-black uppercase tracking-wide">⚠️ Emergency Condition Detected</p>
         <p class="text-xs font-semibold leading-relaxed">${SH.esc(reason)}</p>
-        <p class="text-xs font-bold text-ink">Where are you located right now? (e.g. Odeda, Abeokuta, Kano Municipal):</p>
-        <div class="flex gap-2">
-          <input type="text" id="locInput_${cardId}" placeholder="Enter town or area" class="flex-1 min-h-11 px-3 rounded-xl border border-slate-300 text-xs bg-white text-ink font-semibold">
-          <button onclick="findCenters('${cardId}', '${encodeURIComponent(reason)}')" class="min-h-11 px-3 bg-danger text-white rounded-xl font-bold text-xs hover:bg-danger-dark transition">
-            Find Centers
-          </button>
+        <div class="pt-2 border-t border-danger/20 flex items-center gap-2">
+          <span class="w-8 h-8 rounded-full bg-danger text-white flex items-center justify-center flex-shrink-0 font-bold">
+            {{ icon('mic', 'h-4 w-4') }}
+          </span>
+          <p class="text-xs font-bold text-ink leading-tight">
+            Hold the mic button below and speak your town or area (e.g. "Abeokuta", "Odeda", "Kano").
+          </p>
         </div>
       </div>
     </div>`);
   $('chatMessages').scrollTop = $('chatMessages').scrollHeight;
 }
-
-// ---- Step 2: List Matched Centers & Generate Open Pass ----
-window.findCenters = async function(cardId, encodedReason) {
-  const reason = decodeURIComponent(encodedReason);
-  const locVal = ($(`locInput_${cardId}`).value || '').trim();
-  if (!locVal) return SH.toast('Please enter your area or city first.', 'error');
-
-  try {
-    const centers = await SH.api(`/api/centers/search?q=${encodeURIComponent(locVal)}`);
-    const card = $(cardId);
-    if (!card) return;
-
-    const names = centers.map(c => c.name + (c.location ? ` (${c.location})` : ''));
-    const namesListStr = names.join(', ');
-
-    card.innerHTML = `
-      <div class="max-w-[85%] rounded-2xl rounded-tl-none p-4 bg-white border-2 border-danger text-ink space-y-3 shadow-md">
-        <p class="text-xs font-black text-danger uppercase tracking-wide">Nearby Hospitals in ${SH.esc(locVal)}:</p>
-        <div class="space-y-1.5 text-xs">
-          ${centers.map(c => `<div class="p-2 rounded-lg bg-slate-50 border border-slate-200 font-semibold text-slate-800">🏥 ${SH.esc(c.name)} <span class="text-slate-500 font-normal block">${SH.esc(c.location || '')}</span></div>`).join('')}
-        </div>
-        <button onclick="createOpenPass('${cardId}', '${encodeURIComponent(reason)}', '${encodeURIComponent(locVal)}', '${encodeURIComponent(namesListStr)}')"
-          class="w-full min-h-12 bg-danger text-white rounded-xl font-bold text-xs hover:bg-danger-dark transition">
-          Generate Emergency Pass for these Hospitals
-        </button>
-      </div>`;
-    $('chatMessages').scrollTop = $('chatMessages').scrollHeight;
-  } catch (err) {
-    SH.toast(err.message, 'error');
-  }
-};
-
-window.createOpenPass = async function(cardId, encodedReason, encodedLoc, encodedHospitals) {
-  const reason = decodeURIComponent(encodedReason);
-  const loc = decodeURIComponent(encodedLoc);
-  const hospitalsStr = decodeURIComponent(encodedHospitals);
-  const card = $(cardId);
-  if (card) card.remove();
-
-  try {
-    const resp = await SH.api('/api/patient_emergency_referral', {
-      json: {
-        phone_number: phone,
-        reason: reason,
-        location: loc
-      }
-    });
-
-    const ticketObj = {
-      code: resp.referral_code,
-      qr: resp.referral_qr,
-      hospitals: hospitalsStr,
-      location: loc
-    };
-    saveActiveTicket(ticketObj);
-
-    // Render ticket in conversation thread
-    $('chatMessages').insertAdjacentHTML('beforeend', `
-      <div class="flex justify-start">
-        <div class="max-w-[85%] rounded-2xl rounded-tl-none p-4 bg-white border-2 border-brand text-ink text-center space-y-2.5 shadow-sm">
-          <span class="inline-block px-2.5 py-0.5 rounded-full bg-danger-soft text-danger-dark text-[11px] font-bold uppercase">Emergency Open Pass</span>
-          <p class="text-xs font-bold text-slate-600">Show this code at any of the nearby hospitals:</p>
-          <div class="text-2xl font-mono font-black text-brand tracking-widest bg-brand-soft py-1.5 rounded-xl">${SH.esc(resp.referral_code)}</div>
-          <img src="${resp.referral_qr}" alt="Referral QR" class="mx-auto w-32 h-32 rounded-lg border border-slate-200">
-          <p class="text-[11px] text-slate-600 font-medium">${SH.esc(hospitalsStr)}</p>
-          <p class="text-[10px] text-slate-400">This code floats at the top of your screen until reception accepts it.</p>
-        </div>
-      </div>`);
-    $('chatMessages').scrollTop = $('chatMessages').scrollHeight;
-  } catch (err) {
-    SH.toast(err.message, 'error');
-  }
-};
 
 // ---- Modal Toggle for Floating Pill ----
 $('floatingTicketPill').addEventListener('click', () => {
