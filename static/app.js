@@ -1,8 +1,7 @@
-/* SmartHealth shared client helpers. Loaded on every page as window.SH. */
+/* SmartHealth shared client helpers with Offline In-App Help & Long-Press */
 (function () {
   const csrf = document.querySelector('meta[name="csrf-token"]')?.content || '';
 
-  /** Escape text before putting it into innerHTML. */
   const esc = (s) =>
     String(s ?? '').replace(/[&<>"']/g, (c) => ({
       '&': '&amp;',
@@ -12,7 +11,6 @@
       "'": '&#39;'
     }[c]));
 
-  /** fetch wrapper: defaults to GET when no body is sent, POST when json/form is sent. */
   async function api(url, { method, json, form } = {}) {
     if (!method) {
       method = (json !== undefined || form) ? 'POST' : 'GET';
@@ -35,12 +33,11 @@
       throw new Error('Your session expired. Please log in again.');
     }
     let data = null;
-    try { data = await res.json(); } catch (_) { /* non-JSON body */ }
+    try { data = await res.json(); } catch (_) { /* non-JSON */ }
     if (!res.ok) throw new Error((data && data.error) || 'Something went wrong. Please try again.');
     return data;
   }
 
-  /** Short message at top of screen. */
   function toast(message, kind = 'info') {
     const host = document.getElementById('toasts');
     if (!host) return alert(message);
@@ -53,7 +50,6 @@
     setTimeout(() => el.remove(), kind === 'error' ? 5400 : 3200);
   }
 
-  /** Disable button and swap label while an async job runs. */
   async function busy(btn, label, job) {
     const original = btn.innerHTML;
     btn.disabled = true;
@@ -62,7 +58,6 @@
     finally { btn.disabled = false; btn.innerHTML = original; }
   }
 
-  /** Voice recorder. */
   class Recorder {
     constructor() {
       this.rec = null;
@@ -111,7 +106,6 @@
     }
   }
 
-  /** Patient picker. */
   class PatientPicker {
     constructor(root, { onChange, label = 'Patient' } = {}) {
       this.root = root;
@@ -481,6 +475,149 @@
     }
   }
 
+  // ==========================================
+  // OFFLINE IN-APP HELP & LONG-PRESS ENGINE
+  // ==========================================
+  const HELP_DOCS = {
+    translateBtn: {
+      title: { en: 'Translate & Extract Data', ha: 'Fassara da Ciro Bayanai', pcm: 'Translate and Collect Info' },
+      desc: {
+        en: 'Transcribes patient speech, extracts mentioned vitals (BP, SpO2, temp), and prepares physical gestures for verification.',
+        ha: 'Yana ɗaukar muryar mara lafiya, ciro ma\'aunin jini da zazzabi, tare da shirya gwajin tabbatarwa.',
+        pcm: 'E dey record wetin patient talk, bring out BP and fever readings, and give actions to confirm am.'
+      },
+      faqs: [
+        { q: { en: 'When do I use this?', ha: 'Yaushe zan yi amfani da wannan?', pcm: 'When I go use am?' },
+          a: { en: 'Right after recording patient statement during intake.', ha: 'Bayan ka ɗauki muryar mara lafiya.', pcm: 'As you finish record the patient.' } },
+        { q: { en: 'What if audio is unclear?', ha: 'Idan muryar ba ta fita da kyau ba fah?', pcm: 'Wetin if voice no clear?' },
+          a: { en: 'Tap Clear and record again in a quiet area.', ha: 'Goge sannan ka sake rikodi a wuri mai natsuwa.', pcm: 'Clear am make you record again for quiet place.' } }
+      ]
+    },
+    submitBtn: {
+      title: { en: 'Calculate Triage Tier', ha: 'Lissafa Matakin Hatsari (Triage)', pcm: 'Calculate Triage Sickness Level' },
+      desc: {
+        en: 'Calculates clinical risk (RED = Emergency, YELLOW = Urgent, GREEN = Routine) using SpO2, blood pressure, heart rate, and temperature.',
+        ha: 'Yana lissafin matakin hatsari (JA = Gaggawa, RAWAYA = Na kusa, KORE = Na al\'ada) ta amfani da ma\'aunan jini.',
+        pcm: 'E go check BP, breath, and temperature know whether the sickness serious well-well (RED) or normal (GREEN).'
+      },
+      faqs: [
+        { q: { en: 'What if result is RED?', ha: 'Menene zanyi idan ya nuna JA?', pcm: 'Wetin I go do if e show RED?' },
+          a: { en: 'Immediately stabilise the patient and refer to hospital.', ha: 'Ka bashi taimakon gaggawa sannan ka tura shi asibiti.', pcm: 'Prepare patient quick for referral go hospital.' } }
+      ]
+    },
+    analyzeBtn: {
+      title: { en: 'Analyze Symptoms with AI', ha: 'Bincika Alamomin Cuta', pcm: 'Check Symptoms with AI' },
+      desc: {
+        en: 'Evaluates symptoms and vitals to suggest the most likely conditions in Nigeria (e.g. malaria, pneumonia).',
+        ha: 'Yana duba alamomin cuta don ba da shawarar cututtuka da suka dace a Najeriya.',
+        pcm: 'E go check the symptoms and vitals suggest which sickness fit cause am like malaria.'
+      },
+      faqs: [
+        { q: { en: 'Can I type my own diagnosis?', ha: 'Zan iya rubuta nawa ra\'ayin?', pcm: 'I fit type my own diagnosis?' },
+          a: { en: 'Yes, select "Other / Input Custom Diagnosis" below the AI list.', ha: 'Eh, zabi "Other" ka rubuta naka.', pcm: 'Yes, select "Other" type your own diagnosis.' } }
+      ]
+    },
+    playInstructionBtn: {
+      title: { en: 'Play Instructions to Patient', ha: 'Karanta Shawarwari ga Mara Lafiya', pcm: 'Play Instructions for Patient' },
+      desc: {
+        en: 'Speaks out the prescribed care plan and danger signs in Hausa, Pidgin, or English.',
+        ha: 'Yana karanta yadda ake shan magunguna da gargadi a yaren da mara lafiya yake ji.',
+        pcm: 'E dey read how to take medicine and warning signs for the language wey patient understand.'
+      },
+      faqs: [
+        { q: { en: 'Can I edit instructions first?', ha: 'Zan iya gyara shawarwarin?', pcm: 'I fit edit am first?' },
+          a: { en: 'Yes, edit the text box before pressing play.', ha: 'Eh, rubuta ko gyara kafin ka danna play.', pcm: 'Yes, change the text before you press play.' } }
+      ]
+    }
+  };
+
+  let helpLang = 'en';
+  let helpModeActive = false;
+  let activeHelpKey = 'submitBtn';
+
+  function openHelp(key) {
+    activeHelpKey = key || 'submitBtn';
+    renderHelpModal();
+    document.getElementById('helpModal')?.classList.remove('hidden');
+  }
+
+  function closeHelp() {
+    document.getElementById('helpModal')?.classList.add('hidden');
+  }
+
+  function setHelpLang(lang) {
+    helpLang = lang;
+    ['En', 'Ha', 'Pcm'].forEach(l => {
+      const btn = document.getElementById(`lang${l}Btn`);
+      if (btn) {
+        const isMatch = l.toLowerCase() === lang;
+        btn.className = isMatch ? 'px-2 py-1 rounded bg-white text-ink shadow-xs' : 'px-2 py-1 rounded text-slate-500';
+      }
+    });
+    renderHelpModal();
+  }
+
+  function renderHelpModal() {
+    const doc = HELP_DOCS[activeHelpKey] || HELP_DOCS.submitBtn;
+    const titleEl = document.getElementById('helpTitle');
+    const descEl = document.getElementById('helpDescription');
+    const faqList = document.getElementById('helpFaqList');
+    if (!titleEl || !descEl || !faqList) return;
+
+    titleEl.textContent = doc.title[helpLang] || doc.title.en;
+    descEl.textContent = doc.desc[helpLang] || doc.desc.en;
+
+    faqList.innerHTML = (doc.faqs || []).map(f => `
+      <details class="p-2.5 rounded-xl bg-slate-50 border border-slate-200">
+        <summary class="font-bold cursor-pointer text-slate-800">${esc(f.q[helpLang] || f.q.en)}</summary>
+        <p class="mt-1.5 text-slate-600 font-medium">${esc(f.a[helpLang] || f.a.en)}</p>
+      </details>
+    `).join('');
+  }
+
+  function toggleHelpMode() {
+    helpModeActive = !helpModeActive;
+    const banner = document.getElementById('helpActiveBanner');
+    const btn = document.getElementById('helpToggleBtn');
+    if (banner) banner.classList.toggle('hidden', !helpModeActive);
+    if (btn) btn.className = helpModeActive ? 'w-8 h-8 rounded-xl bg-warn text-white font-black text-xs flex items-center justify-center shadow-sm' : 'w-8 h-8 rounded-xl border border-slate-300 text-slate-700 font-black text-xs flex items-center justify-center hover:bg-slate-100 transition';
+  }
+
+  function setupHelpEvents() {
+    document.getElementById('helpToggleBtn')?.addEventListener('click', toggleHelpMode);
+    document.getElementById('exitHelpBtn')?.addEventListener('click', toggleHelpMode);
+
+    // Attach long-press & help mode interceptor to main buttons
+    const targets = ['submitBtn', 'analyzeBtn', 'translateBtn', 'playInstructionBtn'];
+    targets.forEach(id => {
+      const el = document.getElementById(id);
+      if (!el) return;
+
+      let pressTimer = null;
+      let isLong = false;
+
+      el.addEventListener('pointerdown', () => {
+        isLong = false;
+        pressTimer = setTimeout(() => {
+          isLong = true;
+          openHelp(id);
+        }, 550);
+      });
+
+      el.addEventListener('pointerup', () => clearTimeout(pressTimer));
+      el.addEventListener('pointercancel', () => clearTimeout(pressTimer));
+
+      // Click interceptor when Help Mode is ON
+      el.addEventListener('click', (e) => {
+        if (helpModeActive || isLong) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          openHelp(id);
+        }
+      }, true);
+    });
+  }
+
   function watchConnection() {
     const badge = document.getElementById('connBadge');
     if (!badge) return;
@@ -506,11 +643,15 @@
     toast,
     busy,
     Recorder,
-    PatientPicker
+    PatientPicker,
+    openHelp,
+    closeHelp,
+    setHelpLang
   };
 
   document.addEventListener('DOMContentLoaded', () => {
     watchConnection();
     registerWorker();
+    setupHelpEvents();
   });
 })();
