@@ -1,89 +1,148 @@
 <!DOCTYPE html>
-{% from "_macros.html" import icon %}
-<html lang="en">
+<html lang="en" class="h-full bg-surface text-ink antialiased">
 <head>
-  <meta charset="UTF-8">
+  <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f766e">
   <meta name="csrf-token" content="{{ csrf_token }}">
-  <meta name="theme-color" content="#0F172A">
   <title>{% block title %}SmartHealth{% endblock %}</title>
-
   <link rel="manifest" href="/static/manifest.json">
-  <link rel="icon" type="image/png" href="/static/icons/icon-192.png">
-  <link rel="apple-touch-icon" href="/static/icons/icon-192.png">
-
+  <link rel="stylesheet" href="/static/app.css">
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
-    // Design tokens. Named by role so they never collide with Tailwind's built-in palettes.
-    tailwind.config = { theme: { extend: { colors: {
-      ink: '#0F172A',
-      surface: '#F8FAFC',
-      brand: { DEFAULT: '#059669', dark: '#047857', soft: '#ECFDF5' },
-      danger: { DEFAULT: '#DC2626', dark: '#B91C1C', soft: '#FEF2F2' },
-      warn: { DEFAULT: '#D97706', dark: '#B45309', soft: '#FFFBEB' },
-      info: { DEFAULT: '#0284C7', soft: '#F0F9FF' }
-    } } } };
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: { DEFAULT: '#0f766e', dark: '#115e59', soft: '#ccfbf1' },
+            warn:  { DEFAULT: '#f59e0b', dark: '#b45309', soft: '#fef3c7' },
+            danger:{ DEFAULT: '#e11d48', dark: '#9f1239', soft: '#ffe4e6' },
+            info:  { DEFAULT: '#0284c7', dark: '#0369a1', soft: '#e0f2fe' },
+            surface: '#f8fafc',
+            ink: '#0f172a'
+          }
+        }
+      }
+    };
   </script>
-  <link rel="stylesheet" href="/static/app.css">
+  {% block head %}{% endblock %}
 </head>
+<body class="min-h-full flex flex-col font-sans bg-surface text-ink select-none sm:select-auto">
 
-<body class="min-h-dvh bg-surface text-ink antialiased flex flex-col">
-  <a href="#main" class="sr-only focus:not-sr-only focus:absolute focus:z-50 focus:bg-white focus:p-3">Skip to content</a>
-
-  <header class="bg-ink text-white shadow-md sticky top-0 z-30" style="padding-top: env(safe-area-inset-top, 0px)">
-    <div class="max-w-2xl mx-auto px-4 h-14 flex items-center gap-3">
-      <a href="{{ '/dashboard' if current_worker else '/' }}" class="flex items-center gap-2.5 min-w-0">
-        <span class="w-8 h-8 bg-brand rounded-lg flex items-center justify-center">{{ icon('heart', 'h-5 w-5 text-white') }}</span>
-        <span class="text-lg font-black tracking-tight">SmartHealth</span>
+  {% if not bare %}
+  <!-- Top Navigation Header -->
+  <header class="sticky top-0 z-40 bg-white border-b border-slate-200 shadow-xs">
+    <div class="max-w-2xl mx-auto px-4 h-14 flex items-center justify-between">
+      <a href="/dashboard" class="flex items-center gap-2">
+        <div class="w-8 h-8 rounded-xl bg-brand text-white flex items-center justify-center font-bold">
+          <svg class="h-4 w-4" fill="currentColor" viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
+        </div>
+        <div>
+          <span class="font-black text-ink leading-tight text-sm">SmartHealth</span>
+          {% if current_worker %}
+            <p class="text-[10px] text-slate-500 truncate max-w-[170px]">{{ current_worker.name }} · {{ current_worker.facility }}</p>
+          {% endif %}
+        </div>
       </a>
-      <div class="ml-auto flex items-center gap-2">
-        <span id="netPill" data-online="true" class="flex items-center gap-1.5 text-xs font-semibold bg-white/10 rounded-full px-2.5 py-1">
-          <i class="w-2 h-2 rounded-full inline-block"></i><span>Online</span>
-        </span>
+      <div class="flex items-center gap-1.5">
+        <span id="connBadge" class="conn-badge conn-on">Online</span>
+
+        <!-- Help Mode Toggle Button -->
+        <button id="helpToggleBtn" type="button" title="Help mode: tap any button to inspect"
+          class="w-8 h-8 rounded-xl border border-slate-300 text-slate-700 font-black text-xs flex items-center justify-center hover:bg-slate-100 transition active:scale-95">
+          ?
+        </button>
+
         {% if current_worker %}
-        <a href="/logout" aria-label="Log out" title="Log out as {{ current_worker.name }}" class="w-10 h-10 flex items-center justify-center rounded-full hover:bg-white/10">
-          {{ icon('logout') }}
-        </a>
+          <a href="/logout" title="Log out" class="w-8 h-8 flex items-center justify-center text-slate-500 hover:text-danger rounded-xl">
+            <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/></svg>
+          </a>
         {% endif %}
       </div>
     </div>
-    {% if current_worker %}
-    <p class="max-w-2xl mx-auto px-4 pb-2 -mt-1 text-xs text-slate-400 truncate">{{ current_worker.name }}, {{ current_worker.facility }}</p>
-    {% endif %}
-  </header>
 
-  <main id="main" class="flex-1 w-full mx-auto {{ main_class | default('max-w-2xl px-4 pt-5 ' ~ ('pb-28' if current_worker else 'pb-10')) }}">
+    <!-- Active Help Mode Bar -->
+    <div id="helpActiveBanner" class="hidden bg-ink text-white px-4 py-2 text-xs flex items-center justify-between font-bold">
+      <span class="flex items-center gap-1.5">
+        <span class="w-2 h-2 rounded-full bg-warn animate-ping"></span>
+        Help Mode Active: Tap any button to see what it does.
+      </span>
+      <button id="exitHelpBtn" class="px-2 py-0.5 rounded bg-white/20 text-[11px] hover:bg-white/30">Exit</button>
+    </div>
+  </header>
+  {% endif %}
+
+  <!-- Toast Notification Container -->
+  <div id="toasts" class="fixed top-16 left-0 right-0 z-50 pointer-events-none flex flex-col items-center gap-2 px-4" aria-live="assertive"></div>
+
+  <!-- Main View -->
+  <main class="flex-1 {{ main_class or 'max-w-2xl w-full mx-auto p-4 pb-24' }}">
     {% block content %}{% endblock %}
   </main>
 
-  {% if current_worker and not bare %}
-  {% set tabs = [
-    ('ledger', '/dashboard', 'Ledger', 'ledger'),
-    ('intake', '/translator', 'Intake', 'mic'),
-    ('triage', '/triage', 'Triage', 'triage'),
-    ('diagnosis', '/diagnosis', 'Diagnosis', 'diagnosis'),
-    ('referral', '/referral', 'Refer', 'referral'),
-    ('lookup', '/lookup', 'Lookup', 'search')
-  ] %}
-  <nav class="tabbar fixed bottom-0 inset-x-0 z-30 bg-white border-t border-slate-200" aria-label="Main">
-    <ul class="max-w-2xl mx-auto grid grid-cols-6">
-      {% for key, href, label, ic in tabs %}
-      <li>
-        <a href="{{ href }}" {% if active == key %}aria-current="page"{% endif %}
-           class="flex flex-col items-center justify-center gap-0.5 min-h-14 text-[11px] font-semibold transition {{ 'text-brand' if active == key else 'text-slate-500 hover:text-ink' }}">
-          {{ icon(ic, 'h-6 w-6') }}{{ label }}
-        </a>
-      </li>
-      {% endfor %}
-    </ul>
+  {% if not bare and current_worker %}
+  <!-- Mobile Bottom Tab Navigation -->
+  <nav class="fixed bottom-0 left-0 right-0 z-30 bg-white/95 backdrop-blur border-t border-slate-200">
+    <div class="max-w-2xl mx-auto h-16 flex items-stretch text-[10px] font-bold text-slate-500">
+      <a href="/dashboard" class="flex-1 flex flex-col items-center justify-center gap-1 hover:text-ink {{ 'text-brand' if active == 'ledger' else '' }}">
+        <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+        <span>Ledger</span>
+      </a>
+      <a href="/translator" class="flex-1 flex flex-col items-center justify-center gap-1 hover:text-ink {{ 'text-brand' if active == 'intake' else '' }}">
+        <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 100-6 3 3 0 000 6z"/></svg>
+        <span>Intake</span>
+      </a>
+      <a href="/triage" class="flex-1 flex flex-col items-center justify-center gap-1 hover:text-ink {{ 'text-brand' if active == 'triage' else '' }}">
+        <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+        <span>Triage</span>
+      </a>
+      <a href="/diagnosis" class="flex-1 flex flex-col items-center justify-center gap-1 hover:text-ink {{ 'text-brand' if active == 'diagnosis' else '' }}">
+        <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/></svg>
+        <span>Diagnosis</span>
+      </a>
+      <a href="/referral" class="flex-1 flex flex-col items-center justify-center gap-1 hover:text-ink {{ 'text-brand' if active == 'referral' else '' }}">
+        <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M14 5l7 7m0 0l-7 7m7-7H3"/></svg>
+        <span>Refer</span>
+      </a>
+      <a href="/lookup" class="flex-1 flex flex-col items-center justify-center gap-1 hover:text-ink {{ 'text-brand' if active == 'lookup' else '' }}">
+        <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+        <span>Lookup</span>
+      </a>
+    </div>
   </nav>
   {% endif %}
 
-  <div id="toasts" aria-live="polite"></div>
+  <!-- In-App Help Bottom-Sheet Modal -->
+  <div id="helpModal" class="hidden fixed inset-0 z-50 bg-ink/50 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4">
+    <div class="bg-white w-full max-w-lg rounded-t-3xl sm:rounded-3xl p-5 space-y-4 shadow-2xl border border-slate-200">
+      <div class="flex items-start justify-between pb-2 border-b border-slate-100">
+        <div>
+          <span class="text-[10px] font-black uppercase tracking-wider text-brand">Action Guide</span>
+          <h3 id="helpTitle" class="text-base font-black text-ink">Action Name</h3>
+        </div>
+        <!-- Language Switcher Tabs -->
+        <div class="flex gap-1 bg-slate-100 p-0.5 rounded-lg text-xs font-bold">
+          <button type="button" onclick="window.SH.setHelpLang('en')" id="langEnBtn" class="px-2 py-1 rounded bg-white text-ink shadow-xs">EN</button>
+          <button type="button" onclick="window.SH.setHelpLang('ha')" id="langHaBtn" class="px-2 py-1 rounded text-slate-500">HA</button>
+          <button type="button" onclick="window.SH.setHelpLang('pcm')" id="langPcmBtn" class="px-2 py-1 rounded text-slate-500">PID</button>
+        </div>
+      </div>
+
+      <!-- Description Body -->
+      <div class="p-3 bg-surface rounded-xl border border-slate-200 text-xs text-ink leading-relaxed">
+        <p id="helpDescription" class="font-medium"></p>
+      </div>
+
+      <!-- FAQ Section -->
+      <div id="helpFaqList" class="space-y-2 text-xs"></div>
+
+      <button type="button" onclick="window.SH.closeHelp()" class="w-full min-h-11 bg-slate-200 text-ink rounded-xl font-bold text-xs hover:bg-slate-300 transition">
+        Got it, thanks
+      </button>
+    </div>
+  </div>
+
   <script src="/static/app.js"></script>
-  {% if request.path == '/login' %}
-  <script>navigator.serviceWorker && navigator.serviceWorker.ready.then(r => r.active && r.active.postMessage('clear-pages'));</script>
-  {% endif %}
   {% block scripts %}{% endblock %}
 </body>
 </html>
