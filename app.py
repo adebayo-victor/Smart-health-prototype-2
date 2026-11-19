@@ -1532,6 +1532,146 @@ def patient_referral_status():
         return jsonify({"status": "not_found"})
     return jsonify({"status": enc.referral_status})
 
+# ==========================================
+# DUPLICATE DETECTION & MERGE ENGINE
+# ==========================================
+
+@app.route("/api/patients/check-duplicates", methods=["POST"])
+@login_required
+def check_patient_duplicates():
+    """Checks for likely existing matches in the same facility before saving a new patient."""
+    data = request.get_json(silent=True) or {}
+    facility_id = session["facility_id"]
+    name = (data.get("full_name") or "").strip()
+    phone = clean_phone(data.get("phone"))
+    hospital_id = (data.get("hospital_id") or "").strip()
+    age = to_float(data.get("age_years"))
+    sex = str(data.get("sex") or "").upper()[:1]
+
+    matches = []
+    seen_ids = set()
+
+    # 1. Exact match on Facility Hospital ID
+    if hospital_id:
+        p_hid = Patient.query.filter(
+            Patient.facility_id == facility_id,
+            Patient.is_active.is_(True),
+            func.lower(Patient.hospital_id) == hospital_id.lower()
+        ).first()
+        if p_hid:
+            matches.append({**p_hid.to_dict(), "match_reason": f"Exact Hospital ID match: {hospital_id}"})
+            seen_ids.add(p_hid.id)
+
+    # 2. Match on identical phone number
+    if phone:
+        p_phones = Patient.query.filter(
+            Patient.facility_id == facility_id,
+            Patient.is_active.is_(True),
+            Patient.phone == phone,
+            Patient.id.notin_(seen_ids)
+        ).all()
+        for p in p_phones:
+            matches.append({**p.to_dict(), "match_reason": f"Same phone number: {phone}"})
+            seen_ids.add(p.id)
+
+    # 3. Fuzzy name match (sorted tokens + close age or sex)
+    if name:
+        tokens = normalize_name(name).split()
+        if tokens:
+            candidates = Patient.query.filter(
+                Patient.facility_id == facility_id,
+                Patient.is_active.is_(True),
+                Patient.id.notin_(seen_ids)
+            ).all()
+
+            for c in candidates:
+                c_tokens = set((c.name_key or "").split())
+                overlap = len(set(tokens) & c_tokens)
+                # If at least 2 tokens match or name is single word and identical
+                if (overlap >= 2) or (len(tokens) == 1 and tokens[0] in c_tokens):
+                    is_close_age = age is not None and c.age_years is not None and abs(c.age_years - age) <= 3
+                    is_same_sex = sex and c.sex and sex == c.sex
+                    
+                    if is_close_age or is_same_sex:
+                        matches.append({**c.to_dict(), "match_reason": f"Similar name and matching age/gender"})
+                        seen_ids.add(c.id)
+
+    return jsonify({"matches": matches[:5]})
+
+
+@app.route("/api/patients/merge", methods=["POST"])
+@login_required
+def merge_patients():
+    """Combines secondary patient into primary. Reassigns encounters and soft-deletes secondary."""
+    data = request.get_json(silent=True) or {}
+    primary_id = data.get("primary_id")
+    secondary_id = data.get("secondary_id")
+    facility_id = session["facility_id"]
+
+    if not primary_id or not secondary_id:
+        return fail("Both primary and secondary patient IDs are required.", 400)
+    if primary_id == secondary_id:
+        return fail("Cannot merge a patient into themselves.", 400)
+
+    primary = db.session.get(Patient, primary_id)
+    secondary = db.session.get(Patient, secondary_id)
+
+    if not primary or primary.facility_id != facility_id or not primary.is_active:
+        return fail("Primary patient not found or inactive.", 404)
+    if not secondary or secondary.facility_id != facility_id or not secondary.is_active:
+        return fail("Secondary patient not found or already merged.", 404)
+
+    try:
+        # Reassign all encounters to primary
+        Encounter.query.filter_by(patient_id=secondary.id).update({
+            "patient_id": primary.id,
+            "patient_name": primary.full_name
+        })
+
+        # Copy any missing demographic info from secondary to primary
+        if not primary.phone and secondary.phone: primary.phone = secondary.phone
+        if not primary.hospital_id and secondary.hospital_id: primary.hospital_id = secondary.hospital_id
+        if not primary.age_years and secondary.age_years: primary.age_years = secondary.age_years
+        if not primary.sex and secondary.sex: primary.sex = secondary.sex
+        if not primary.village_lga and secondary.village_lga: primary.village_lga = secondary.village_lga
+        if not primary.allergies and secondary.allergies: primary.allergies = secondary.allergies
+
+        # Soft-delete secondary record and point to primary
+        secondary.is_active = False
+        secondary.merged_into_id = primary.id
+
+        db.session.commit()
+        return jsonify({
+            "success": True,
+            "primary": primary.to_dict(),
+            "merged_secondary_id": secondary.id
+        })
+    except Exception as e:
+        db.session.rollback()
+        return fail("Failed to merge patient records.", 500, e)
+
+
+@app.route("/api/patients/undo-merge/<int:secondary_id>", methods=["POST"])
+@login_required
+def undo_merge(secondary_id):
+    """Reverses an accidental merge."""
+    facility_id = session["facility_id"]
+    secondary = db.session.get(Patient, secondary_id)
+
+    if not secondary or secondary.facility_id != facility_id:
+        return fail("Patient record not found.", 404)
+    if secondary.is_active or not secondary.merged_into_id:
+        return fail("This patient record is not in a merged state.", 400)
+
+    try:
+        primary_id = secondary.merged_into_id
+        secondary.is_active = True
+        secondary.merged_into_id = None
+        db.session.commit()
+        return jsonify({"success": True, "restored_patient": secondary.to_dict()})
+    except Exception as e:
+        db.session.rollback()
+        return fail("Failed to undo merge.", 500, e)
 
 if __name__ == "__main__":
     app.run(debug=DEBUG, port=int(os.getenv("PORT", 5000)))
