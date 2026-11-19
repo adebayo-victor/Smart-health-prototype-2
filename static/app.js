@@ -13,7 +13,11 @@
     }[c]));
 
   /** fetch wrapper: adds the CSRF header, parses JSON, throws Error with a readable message. */
-  async function api(url, { method = 'POST', json, form } = {}) {
+  // To this:
+  async function api(url, { method, json, form } = {}) {
+    if (!method) {
+      method = (json !== undefined || form) ? 'POST' : 'GET';
+    }
     const opts = { method, headers: { 'X-CSRF-Token': csrf }, credentials: 'same-origin' };
     if (json !== undefined) {
       opts.headers['Content-Type'] = 'application/json';
