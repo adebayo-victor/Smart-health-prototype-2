@@ -12,8 +12,7 @@
       "'": '&#39;'
     }[c]));
 
-  /** fetch wrapper: adds the CSRF header, parses JSON, throws Error with a readable message. */
-  // To this:
+  /** fetch wrapper: defaults to GET when no body is sent, POST when json/form is sent. */
   async function api(url, { method, json, form } = {}) {
     if (!method) {
       method = (json !== undefined || form) ? 'POST' : 'GET';
@@ -41,7 +40,7 @@
     return data;
   }
 
-  /** Short message at the top of the screen. kind: info | success | error */
+  /** Short message at top of screen. */
   function toast(message, kind = 'info') {
     const host = document.getElementById('toasts');
     if (!host) return alert(message);
@@ -54,7 +53,7 @@
     setTimeout(() => el.remove(), kind === 'error' ? 5400 : 3200);
   }
 
-  /** Disable a button and swap its label while an async job runs. */
+  /** Disable button and swap label while an async job runs. */
   async function busy(btn, label, job) {
     const original = btn.innerHTML;
     btn.disabled = true;
@@ -63,7 +62,7 @@
     finally { btn.disabled = false; btn.innerHTML = original; }
   }
 
-  /** Voice recorder that works on Chrome (webm) and Safari (mp4). */
+  /** Voice recorder. */
   class Recorder {
     constructor() {
       this.rec = null;
@@ -112,10 +111,7 @@
     }
   }
 
-  /**
-   * Patient picker: search facility registry, pick patient, or register new one.
-   * Includes duplicate detection and hospital ID management.
-   */
+  /** Patient picker. */
   class PatientPicker {
     constructor(root, { onChange, label = 'Patient' } = {}) {
       this.root = root;
@@ -280,7 +276,7 @@
     async search(q) {
       const res = this.$('[data-results]');
       try {
-        const list = await SH.api(`/api/patients?q=${encodeURIComponent(q.trim())}`);
+        const list = await SH.api(`/api/patients?q=${encodeURIComponent(q.trim())}`, { method: 'GET' });
         if (!list || list.length === 0) {
           res.innerHTML = q.trim()
             ? `<li class="p-3 bg-brand-soft/40 border border-brand/30 rounded-xl flex items-center justify-between text-xs font-bold text-brand-dark cursor-pointer hover:bg-brand-soft" data-add-named>
@@ -418,7 +414,6 @@
         return;
       }
 
-      // Check duplicates before creating a new record
       if (!skipCheck && !this.editing) {
         try {
           const check = await SH.api('/api/patients/check-duplicates', { json: data });
@@ -486,7 +481,6 @@
     }
   }
 
-  // Connection monitoring badge
   function watchConnection() {
     const badge = document.getElementById('connBadge');
     if (!badge) return;
@@ -500,14 +494,12 @@
     set();
   }
 
-  // Register service worker
   function registerWorker() {
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => {});
     }
   }
 
-  // Export to window.SH
   window.SH = {
     esc,
     api,
