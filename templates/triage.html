@@ -1,83 +1,257 @@
 {% extends "base.html" %}
-{% from "_macros.html" import icon, page_header, vitals_grid %}
+{% from "_macros.html" import icon, page_header %}
 {% set active = 'triage' %}
-{% block title %}Offline triage · SmartHealth{% endblock %}
+{% block title %}Patient triage · SmartHealth{% endblock %}
 
 {% block content %}
-{{ page_header('Offline triage settler', '/dashboard', 'Rules run on your phone. No AI or signal needed to get a result.') }}
+{{ page_header('Patient triage', '/dashboard', 'Check vital signs and calculate clinical risk tier.') }}
 
-<div id="patientPicker" class="mb-4"></div>
+<!-- Persistent Stepper Bar -->
+<div class="mb-5 space-y-3">
+  <nav class="flex items-center justify-between bg-white rounded-2xl border border-slate-200 p-1.5 shadow-sm text-xs font-bold overflow-x-auto" aria-label="Workflow Stages">
+    <a id="stepIntake" href="/translator" class="flex-1 min-w-[70px] py-2 px-1.5 text-center rounded-xl transition flex items-center justify-center text-slate-500 hover:text-ink">
+      1. Intake
+    </a>
+    <span class="text-slate-300">›</span>
+    <a id="stepTriage" href="/triage" class="flex-1 min-w-[70px] py-2 px-1.5 text-center rounded-xl bg-brand text-white shadow-sm flex items-center justify-center">
+      2. Triage
+    </a>
+    <span class="text-slate-300">›</span>
+    <a id="stepDiagnosis" href="/diagnosis" class="flex-1 min-w-[75px] py-2 px-1.5 text-center rounded-xl transition flex items-center justify-center text-slate-500 hover:text-ink">
+      3. Diagnosis
+    </a>
+    <span class="text-slate-300">›</span>
+    <a id="stepReferral" href="/referral" class="flex-1 min-w-[70px] py-2 px-1.5 text-center rounded-xl transition flex items-center justify-center text-slate-500 hover:text-ink">
+      4. Referral
+    </a>
+  </nav>
 
-<div class="mb-6">{{ vitals_grid() }}</div>
-
-<button id="processBtn" class="w-full min-h-14 bg-ink text-white rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-slate-800 transition mb-6">
-  Process triage
-</button>
-
-<section id="triageResult" class="hidden rounded-2xl border-2 p-5 mb-6" aria-live="polite">
-  <div class="flex items-center gap-4 mb-3">
-    <span id="resultIcon"></span>
-    <div class="min-w-0">
-      <p id="resultTier" class="text-2xl font-black"></p>
-      <p id="resultTrigger" class="text-sm font-semibold mt-1"></p>
+  <!-- Live Active Patient Context Banner -->
+  <div id="activePatientBanner" class="hidden bg-white rounded-2xl border border-slate-200 p-3.5 shadow-sm transition">
+    <div class="flex items-center justify-between">
+      <div class="flex items-center gap-2.5 min-w-0">
+        <div id="bannerAvatar" class="w-9 h-9 rounded-full bg-brand-soft text-brand font-bold flex items-center justify-center flex-shrink-0 text-sm">
+          P
+        </div>
+        <div class="min-w-0">
+          <div class="flex items-center gap-2">
+            <h3 id="bannerPatientName" class="font-bold text-sm text-ink truncate">Patient</h3>
+            <span id="bannerHospitalId" class="hidden text-[10px] font-mono px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 font-bold"></span>
+          </div>
+          <p id="bannerPatientMeta" class="text-xs text-slate-500 truncate"></p>
+        </div>
+      </div>
+      <span id="bannerTriageTier" class="hidden text-xs font-bold px-2.5 py-1 rounded-full uppercase flex-shrink-0"></span>
     </div>
   </div>
-  <p id="resultNotes" class="text-sm bg-white/70 p-3 rounded-lg border border-black/5"></p>
-  <div class="grid grid-cols-2 gap-2 mt-4">
-    <a id="nextDiagnosis" href="/diagnosis" class="min-h-12 bg-ink text-white rounded-xl font-bold flex items-center justify-center hover:bg-slate-800 transition">Run diagnosis</a>
-    <a id="nextReferral" href="/referral" class="min-h-12 bg-white text-ink border border-slate-300 rounded-xl font-bold flex items-center justify-center hover:bg-slate-50 transition">Refer patient</a>
+</div>
+
+<!-- 1. Patient Picker -->
+<div class="bg-white rounded-2xl border border-slate-200 p-4 space-y-3 mb-6">
+  <h2 class="text-sm font-bold text-slate-500">1. Patient</h2>
+  <div id="patientPicker"></div>
+</div>
+
+<!-- 2. Vitals Form -->
+<form id="triageForm" class="bg-white rounded-2xl border border-slate-200 p-4 space-y-4 mb-6">
+  <h2 class="text-sm font-bold text-slate-500">2. Vital signs</h2>
+  <div class="grid grid-cols-2 gap-3 text-sm">
+    <div>
+      <label for="temp" class="text-xs font-bold text-slate-500 block mb-1">Temperature (°C)</label>
+      <input type="number" step="0.1" id="temp" placeholder="37.0" class="w-full min-h-12 px-3.5 rounded-xl border border-slate-300">
+    </div>
+    <div>
+      <label for="spo2" class="text-xs font-bold text-slate-500 block mb-1">SpO2 (%)</label>
+      <input type="number" id="spo2" placeholder="98" class="w-full min-h-12 px-3.5 rounded-xl border border-slate-300">
+    </div>
+    <div>
+      <label for="hr" class="text-xs font-bold text-slate-500 block mb-1">Heart rate (bpm)</label>
+      <input type="number" id="hr" placeholder="72" class="w-full min-h-12 px-3.5 rounded-xl border border-slate-300">
+    </div>
+    <div>
+      <label for="sys_bp" class="text-xs font-bold text-slate-500 block mb-1">Systolic BP</label>
+      <input type="number" id="sys_bp" placeholder="120" class="w-full min-h-12 px-3.5 rounded-xl border border-slate-300">
+    </div>
+    <div class="col-span-2 sm:col-span-1">
+      <label for="dia_bp" class="text-xs font-bold text-slate-500 block mb-1">Diastolic BP</label>
+      <input type="number" id="dia_bp" placeholder="80" class="w-full min-h-12 px-3.5 rounded-xl border border-slate-300">
+    </div>
   </div>
-</section>
+
+  <button type="submit" id="submitBtn" class="w-full min-h-14 bg-brand text-white rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-brand-dark transition">
+    {{ icon('sparkles', 'h-5 w-5') }} Calculate triage tier
+  </button>
+</form>
+
+<!-- 3. Results -->
+<div id="resultCard" class="hidden bg-white rounded-2xl border border-slate-200 p-5 space-y-4">
+  <div class="flex items-center justify-between pb-3 border-b border-slate-100">
+    <div>
+      <p class="text-xs font-bold text-slate-400 uppercase tracking-wider">Calculated Tier</p>
+      <div class="flex items-center gap-2 mt-1">
+        <span id="tierBadge" class="text-sm font-black px-3 py-1 rounded-full uppercase"></span>
+      </div>
+    </div>
+  </div>
+
+  <div id="triggerSection" class="p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs space-y-1">
+    <p class="font-bold text-slate-700 uppercase">Triggers:</p>
+    <p id="triggerText" class="text-slate-600 font-semibold"></p>
+  </div>
+
+  <p id="notesText" class="text-xs text-slate-700 leading-relaxed font-medium"></p>
+
+  <!-- Navigation CTAs -->
+  <div class="pt-2 flex gap-2">
+    <a id="goDiagnosis" href="/diagnosis" class="flex-1 min-h-12 bg-ink text-white rounded-xl font-bold text-xs flex items-center justify-center hover:bg-slate-800 transition">
+      Continue to Diagnosis
+    </a>
+    <a id="goReferral" href="/referral" class="flex-1 min-h-12 bg-danger text-white rounded-xl font-bold text-xs flex items-center justify-center hover:bg-danger-dark transition">
+      Refer Patient
+    </a>
+  </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
 <script>
 const $ = (id) => document.getElementById(id);
-const VITALS = ['temp', 'hr', 'sys_bp', 'dia_bp', 'spo2'];
-let encounterId = new URLSearchParams(location.search).get('encounter_id');
-const picker = new SH.PatientPicker($('patientPicker'));
+const show = (id, on = true) => $(id).classList.toggle('hidden', !on);
 
-// Pick up where intake stopped.
-if (encounterId) {
-  SH.api(`/api/encounter/${encodeURIComponent(encounterId)}`, { method: 'GET' }).then((e) => {
-    if (e.patient) picker.setPatient(e.patient); else picker.suggest(e.patient_name);
-    VITALS.forEach((k) => { if (e.vitals && e.vitals[k] != null) $(k).value = e.vitals[k]; });
-  }).catch(() => { encounterId = null; });
-}
-
-const TIERS = {
-  RED:    { box: 'bg-danger-soft border-danger', text: 'text-danger-dark', label: 'Red: act now',          icon: 'M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z' },
-  YELLOW: { box: 'bg-warn-soft border-warn',     text: 'text-warn-dark',   label: 'Yellow: assess soon',   icon: 'M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z' },
-  GREEN:  { box: 'bg-brand-soft border-brand',   text: 'text-brand-dark',  label: 'Green: stable',         icon: 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z' },
-};
-
-$('processBtn').addEventListener('click', async (e) => {
-  const patient = picker.value;
-  if (!patient) return picker.require();
-  const json = { patient_id: patient.id, encounter_id: encounterId };
-  VITALS.forEach((k) => { json[k] = $(k).value === '' ? null : parseFloat($(k).value); });
-  if (VITALS.every((k) => json[k] === null)) return SH.toast('Enter at least one vital sign.', 'error');
-
-  try {
-    const data = await SH.busy(e.currentTarget, 'Processing', () => SH.api('/api/triage', { json }));
-    encounterId = data.encounter_id;
-    show(data.triage_data);
-    $('nextDiagnosis').href = `/diagnosis?encounter_id=${encounterId}`;
-    $('nextReferral').href = `/referral?encounter_id=${encounterId}`;
-  } catch (err) { SH.toast(err.message, 'error'); }
+let currentEncounterId = null;
+const picker = new SH.PatientPicker($('patientPicker'), {
+  onChange: (p) => updatePatientBanner(p)
 });
 
-function show(t) {
-  const cfg = TIERS[t.tier] || TIERS.GREEN;
-  const box = $('triageResult');
-  box.className = `rounded-2xl border-2 p-5 mb-6 ${cfg.box}`;
-  $('resultTier').className = `text-2xl font-black ${cfg.text}`;
-  $('resultTier').textContent = cfg.label;
-  $('resultTrigger').className = `text-sm font-semibold mt-1 ${cfg.text}`;
-  $('resultTrigger').textContent = 'Triggered by: ' + t.trigger;
-  $('resultNotes').textContent = t.notes;
-  $('resultIcon').innerHTML = `<svg class="w-10 h-10 ${cfg.text}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" aria-hidden="true"><path d="${cfg.icon}"/></svg>`;
-  box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+function updatePatientBanner(patient, tier = null) {
+  if (!patient || !patient.id) {
+    show('activePatientBanner', false);
+    return;
+  }
+  show('activePatientBanner', true);
+  $('bannerPatientName').textContent = patient.full_name;
+  $('bannerAvatar').textContent = (patient.full_name || 'P')[0].toUpperCase();
+
+  if (patient.hospital_id) {
+    $('bannerHospitalId').textContent = `ID: ${patient.hospital_id}`;
+    show('bannerHospitalId', true);
+  } else {
+    show('bannerHospitalId', false);
+  }
+
+  const parts = [];
+  if (patient.age_years) parts.push(`${patient.age_years} yrs`);
+  if (patient.sex) parts.push(patient.sex === 'F' ? 'Female' : 'Male');
+  if (patient.phone) parts.push(patient.phone);
+  $('bannerPatientMeta').textContent = parts.join(' · ');
+
+  if (tier) {
+    const tb = $('bannerTriageTier');
+    tb.textContent = tier;
+    show('bannerTriageTier', true);
+    if (tier === 'RED') tb.className = 'text-xs font-bold px-2.5 py-1 rounded-full uppercase bg-danger-soft text-danger-dark border border-danger/30';
+    else if (tier === 'YELLOW') tb.className = 'text-xs font-bold px-2.5 py-1 rounded-full uppercase bg-warn-soft text-warn-dark border border-warn/30';
+    else tb.className = 'text-xs font-bold px-2.5 py-1 rounded-full uppercase bg-brand-soft text-brand-dark border border-brand/30';
+  }
+
+  // Update stepper navigation links
+  updateStepperLinks(patient.id, currentEncounterId);
 }
+
+function updateStepperLinks(patientId, encId) {
+  const q = `?patient_id=${encodeURIComponent(patientId || '')}&encounter_id=${encodeURIComponent(encId || '')}`;
+  $('stepIntake').href = '/translator' + q;
+  $('stepTriage').href = '/triage' + q;
+  $('stepDiagnosis').href = '/diagnosis' + q;
+  $('stepReferral').href = '/referral' + q;
+}
+
+// Pre-load from URL
+(async function init() {
+  const params = new URLSearchParams(window.location.search);
+  const pId = params.get('patient_id');
+  const eId = params.get('encounter_id');
+
+  if (pId) {
+    try {
+      const p = await SH.api(`/api/patients/${encodeURIComponent(pId)}`);
+      picker.setPatient(p);
+      updatePatientBanner(p);
+    } catch (_) {}
+  }
+
+  if (eId) {
+    currentEncounterId = eId;
+    try {
+      const enc = await SH.api(`/api/encounter/${encodeURIComponent(eId)}`);
+      if (enc.vitals) {
+        if (enc.vitals.temp) $('temp').value = enc.vitals.temp;
+        if (enc.vitals.spo2) $('spo2').value = enc.vitals.spo2;
+        if (enc.vitals.hr) $('hr').value = enc.vitals.hr;
+        if (enc.vitals.sys_bp) $('sys_bp').value = enc.vitals.sys_bp;
+        if (enc.vitals.dia_bp) $('dia_bp').value = enc.vitals.dia_bp;
+      }
+      if (enc.triage_tier) {
+        updatePatientBanner(picker.value, enc.triage_tier);
+      }
+      updateStepperLinks(pId, currentEncounterId);
+    } catch (_) {}
+  }
+})();
+
+$('triageForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const patient = picker.value;
+  if (!patient || !patient.id) return picker.require();
+
+  const vitals = {
+    temp: $('temp').value,
+    spo2: $('spo2').value,
+    hr: $('hr').value,
+    sys_bp: $('sys_bp').value,
+    dia_bp: $('dia_bp').value
+  };
+
+  try {
+    const resp = await SH.busy($('submitBtn'), 'Calculating', () =>
+      SH.api('/api/triage', {
+        json: {
+          patient_id: patient.id,
+          encounter_id: currentEncounterId,
+          ...vitals
+        }
+      })
+    );
+
+    currentEncounterId = resp.encounter_id;
+    const tData = resp.triage_data;
+
+    // Render result card
+    $('tierBadge').textContent = tData.tier;
+    if (tData.tier === 'RED') {
+      $('tierBadge').className = 'text-sm font-black px-3.5 py-1 rounded-full uppercase bg-danger text-white';
+    } else if (tData.tier === 'YELLOW') {
+      $('tierBadge').className = 'text-sm font-black px-3.5 py-1 rounded-full uppercase bg-warn-dark text-white';
+    } else {
+      $('tierBadge').className = 'text-sm font-black px-3.5 py-1 rounded-full uppercase bg-brand text-white';
+    }
+
+    $('triggerText').textContent = tData.trigger || 'Vitals normal';
+    $('notesText').textContent = tData.notes || '';
+
+    // Update banner & stepper
+    updatePatientBanner(resp.patient || patient, tData.tier);
+    updateStepperLinks(patient.id, currentEncounterId);
+
+    const q = `?patient_id=${encodeURIComponent(patient.id)}&encounter_id=${encodeURIComponent(currentEncounterId)}`;
+    $('goDiagnosis').href = '/diagnosis' + q;
+    $('goReferral').href = '/referral' + q;
+
+    show('resultCard', true);
+    $('resultCard').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  } catch (err) {
+    SH.toast(err.message, 'error');
+  }
+});
 </script>
 {% endblock %}
