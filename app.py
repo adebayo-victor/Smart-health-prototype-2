@@ -1261,10 +1261,9 @@ def answer_patient(user_text, translated_text, past_memories, recent_chat, pendi
     We are still waiting for the patient's town/location to generate their hospital referral code.
     - If the user's newest speech mentions where they are (town, city, area, landmark like 'Abeokuta', 'Odeda', 'Kano', 'Sabon Gari'):
       Extract that exact location into "spoken_location".
-    - If the user does NOT mention their location yet (e.g. they express fear, ask a question, or describe pain):
+    - If the user does NOT mention their location yet:
       1. Answer their immediate emotional or medical concern gently and calmly.
-      2. REMIND THEM that hospital care is urgently needed, and ask again which town or area they are in so you can issue their hospital pass.
-      3. Set "is_emergency" = True and "spoken_location" = null.
+      2. Set "is_emergency" = True and "spoken_location" = null.
     """
 
     prompt = f"""
@@ -1291,7 +1290,7 @@ def answer_patient(user_text, translated_text, past_memories, recent_chat, pendi
     2. Check if the user is giving their town, city, or area:
        - If yes, return the city/area name in "spoken_location".
     3. Evaluate if the patient is experiencing an EMERGENCY:
-       - If an emergency is detected or pending, and no location has been given yet, formulate your answer to include a gentle voice prompt asking which town/area they are in.
+       - If an emergency is detected or pending, mark "is_emergency" = True.
 
     Return ONLY valid JSON:
     {{
@@ -1309,8 +1308,8 @@ def answer_patient(user_text, translated_text, past_memories, recent_chat, pendi
     except Exception:
         logger.exception("Patient answer failed")
         res = {
-            "answer_english": "Please visit the nearest health clinic to have this checked.",
-            "answer_local": "Don Allah je asibiti mafi kusa don a duba lafiyarka.",
+            "answer_english": "Please visit the nearest health clinic to have this checked immediately.",
+            "answer_local": "Don Allah je asibiti mafi kusa don a duba lafiyarka da gaggawa.",
             "detected_language": "Hausa",
             "keywords": [],
             "is_emergency": bool(pending_emergency and pending_emergency.get("active")),
@@ -1318,11 +1317,30 @@ def answer_patient(user_text, translated_text, past_memories, recent_chat, pendi
             "spoken_location": None
         }
 
+    # Deterministic keyword safety net
     text_corpus = f"{user_text} {translated_text}"
     if EMERGENCY_PATTERNS.search(text_corpus):
         res["is_emergency"] = True
         if not res.get("emergency_reason"):
             res["emergency_reason"] = "Urgent clinical danger signs detected in speech."
+
+    # -------------------------------------------------------------------------
+    # GUARANTEE: Force the spoken audio to ask for their location out loud
+    # -------------------------------------------------------------------------
+    if res.get("is_emergency") and not res.get("spoken_location"):
+        lang = str(res.get("detected_language", "English")).lower()
+        if "haus" in lang:
+            loc_prompt = " Don Allah danna maballin ka fada min garin ko yankin da kake a yanzu, domin in samo maka asibiti mafi kusa."
+        elif "pidg" in lang:
+            loc_prompt = " Abeg hold the mic tell me which town or area you dey right now, make I find hospital for you quick-quick."
+        else:
+            loc_prompt = " Please hold the mic and tell me what town or area you are in right now, so I can find the nearest hospital for you."
+
+        # If the LLM didn't already include the question in the speech, append it to the spoken text!
+        current_speech = res.get("answer_local", "")
+        if not any(k in current_speech.lower() for k in ["which town", "what town", "wane gari", "which area", "tell me where"]):
+            res["answer_local"] = current_speech.rstrip() + loc_prompt
+            res["answer_english"] = (res.get("answer_english", "")).rstrip() + " Please tell me what town or area you are in right now so I can find the nearest hospital."
 
     return res
 
