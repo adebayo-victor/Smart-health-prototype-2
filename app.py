@@ -274,6 +274,7 @@ _llm = None
 # ---- Speech-to-text settings ----
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-large-v3")
 MIN_AUDIO_BYTES = 2000   # about 0.5 s; one-word answers such as a town name must still pass
+STT_PROMPT_CLINIC = "Medical consultation in Nigeria. Focus only on clear speech. Ignore background noise, coughing, or pauses. Terms: malaria, zazzabi, BP, temperature, headache, stomach."
 # Phrases Whisper tends to invent when it hears silence or noise.
 WHISPER_GHOSTS = {
     "thank you", "thanks", "thank you for watching", "thanks for watching", "you", "bye", "bye bye",
