@@ -271,11 +271,26 @@ with app.app_context():
 _groq = None
 _llm = None
 
+# ---- Speech-to-text settings ----
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-large-v3")
+MIN_AUDIO_BYTES = 2000   # about 0.5 s; one-word answers such as a town name must still pass
+# Short, plain prompts. A long prompt can get echoed back when the audio is silent.
+STT_PROMPT_CLINIC = "Health worker talking to a patient in Nigeria. Words like malaria, zazzabi, BP, temperature."
+STT_PROMPT_COMPANION = "A person in Nigeria talking about their health, or naming their town, such as Kano, Ibadan, Odeda."
+# Phrases Whisper tends to invent when it hears silence or noise.
+WHISPER_GHOSTS = {
+    "thank you", "thanks", "thank you for watching", "thanks for watching", "you", "bye", "bye bye",
+    "okay", "ok", "so", "uh", "um", "hmm", "mm", "mhm", "subtitles by the amaraorg community",
+}
+# What the browser may send as "language". Pidgin has no Whisper code; English works best for it.
+STT_LANGS = {"en": "en", "pcm": "en", "ha": "ha"}
+
 
 def get_groq():
     global _groq
     if _groq is None:
-        _groq = Groq(api_key=os.getenv("GROQ_API_KEY"))
+        # timeout + retries: Groq occasionally returns 429/5xx or stalls on poor links
+        _groq = Groq(api_key=os.getenv("GROQ_API_KEY"), timeout=45.0, max_retries=2)
     return _groq
 
 
@@ -303,19 +318,52 @@ def llm_json(prompt, temperature=0.2):
     return parse_json_reply(llm_text([{"role": "user", "content": prompt}], temperature))
 
 
-def transcribe(audio_file):
+def _seg(seg, key, default=None):
+    """Segments come back as dicts or objects depending on the SDK version."""
+    return seg.get(key, default) if isinstance(seg, dict) else getattr(seg, key, default)
+
+
+def transcribe(audio_file, language=None, prompt=STT_PROMPT_CLINIC):
+    """Whisper transcription that refuses silence and hallucinated filler instead of passing it on."""
     data = audio_file.read()
-    if len(data) < 2000:
-        raise ValueError("Audio too short. Please record at least 2 seconds.")
-    mime = audio_file.mimetype or "audio/webm"
-    result = get_groq().audio.transcriptions.create(
-        file=(audio_file.filename or "audio.webm", data, mime),
-        model="whisper-large-v3",
-        response_format="text",
+    if len(data) < MIN_AUDIO_BYTES:
+        raise ValueError("Recording too short. Hold the button and speak clearly.")
+
+    # Browsers send 'audio/webm;codecs=opus'. Use the bare type and keep the filename for the extension.
+    mime = (audio_file.mimetype or "audio/webm").split(";")[0].strip()
+    filename = audio_file.filename or "audio.webm"
+
+    kwargs = dict(
+        file=(filename, data, mime),
+        model=WHISPER_MODEL,
+        response_format="verbose_json",   # per-segment confidence lets us reject silence
+        temperature=0.0,                  # deterministic; fewer invented words
+        prompt=prompt,
     )
-    text = result.strip() if isinstance(result, str) else result.text.strip()
-    if not text:
-        raise ValueError("No speech detected. Please try again.")
+    if language in ("en", "ha"):
+        kwargs["language"] = language     # a hint beats auto-detect for Hausa and Pidgin
+
+    result = get_groq().audio.transcriptions.create(**kwargs)
+
+    segments = result.get("segments") if isinstance(result, dict) else getattr(result, "segments", None)
+    full_text = (result.get("text") if isinstance(result, dict) else getattr(result, "text", "")) or ""
+
+    if segments:
+        kept = []
+        for s in segments:
+            no_speech = _seg(s, "no_speech_prob", 0.0) or 0.0
+            logprob = _seg(s, "avg_logprob", 0.0) or 0.0
+            # Same rule Whisper's own decoder uses: probably silence AND low confidence.
+            if no_speech > 0.6 and logprob < -1.0:
+                continue
+            kept.append((_seg(s, "text", "") or "").strip())
+        text = " ".join(t for t in kept if t).strip()
+    else:
+        text = full_text.strip()
+
+    norm = re.sub(r"[^\w\s]", "", text.lower()).strip()
+    if not norm or norm in WHISPER_GHOSTS or prompt.lower()[:30] in text.lower():
+        raise ValueError("No speech detected. Move closer, reduce background noise and try again.")
     return text
 
 
@@ -889,16 +937,22 @@ def translate_audio():
     audio_file = request.files.get("audio")
     if not audio_file:
         return fail("No audio file provided.", 400)
+
+    # Optional hint from the "Patient speaks" selector. None means auto-detect.
+    lang = STT_LANGS.get((request.form.get("language") or "").lower())
     try:
-        raw_text = transcribe(audio_file)
+        raw_text = transcribe(audio_file, lang, STT_PROMPT_CLINIC)
     except ValueError as e:
         return fail(str(e), 400)
     except Exception as e:
+        if getattr(e, "status_code", None) == 429:
+            return fail("The speech service is busy. Wait a moment and try again.", 429, e)
         return fail("Could not transcribe the audio. Check connection and try again.", 502, e)
 
     prompt = f"""
     You are a medical data extraction assistant. Analyze this patient statement recorded by a health worker in Nigeria.
-    The statement may be in Hausa, Nigerian Pidgin, or English.
+    The statement may be in Hausa, Nigerian Pidgin, or English. Speech recognition can mishear Hausa and Pidgin,
+    so if a word looks odd, infer the most likely medical meaning instead of copying it blindly.
     STATEMENT: "{raw_text}"
     Return ONLY valid JSON (no markdown, no extra text):
     {{
@@ -927,6 +981,9 @@ def translate_audio():
         data = llm_json(prompt, 0.2)
     except Exception as e:
         return fail("The AI returned unreadable data. Please try again.", 502, e)
+
+    # Never let the model rewrite the transcript: the record must hold exactly what was heard.
+    data["statement"] = raw_text
 
     if not data.get("tc_actions"):
         data["tc_actions"] = [
@@ -1335,10 +1392,13 @@ def patient_voice():
         return fail("Missing a valid phone number or audio.", 400)
 
     try:
-        user_text = transcribe(audio_file)
+        # Auto-detect language here: companion users speak Hausa, Pidgin or English.
+        user_text = transcribe(audio_file, None, STT_PROMPT_COMPANION)
     except ValueError as e:
         return fail(str(e), 400)
     except Exception as e:
+        if getattr(e, "status_code", None) == 429:
+            return fail("Too many people are talking right now. Please try again in a minute.", 429, e)
         return fail("Could not understand the audio. Please speak clearly.", 400, e)
 
     try:
