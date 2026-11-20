@@ -91,7 +91,6 @@
 {% block scripts %}
 <script>
 const $ = (id) => document.getElementById(id);
-const recorder = new SH.Recorder();
 const clips = [];
 let phone = null, busy = false, current = null;
 let activeTicket = null;
@@ -197,9 +196,21 @@ $('changeNumber').addEventListener('click', () => {
 try { const saved = sessionStorage.getItem('sh_phone'); if (saved) enter(saved); } catch (_) {}
 
 // ---- Hold to talk ----
+const MIN_HOLD_MS = 700; // a one-word answer such as a town name is fine; a stray tap is not
 const mic = $('micButton');
+const micRing = mic.querySelector('.mic-ring');
+
+const recorder = new SH.Recorder({
+  maxMs: 60000,
+  // The ring grows with the voice so the user can see the phone is hearing them.
+  onLevel: (lv) => { if (micRing) micRing.style.transform = `scale(${1 + Math.min(lv * 0.6, 0.5)})`; },
+  onLimit: () => release(),
+  onError: (err) => { busy = false; ui('idle'); SH.toast(err.message, 'error'); }
+});
+
 function ui(state) {
   mic.classList.remove('recording', 'thinking');
+  if (micRing && state !== 'recording') micRing.style.transform = '';
   const s = $('statusText');
   s.className = 'text-center text-sm font-semibold mb-3 h-5 ' + ({ recording: 'text-danger-dark', thinking: 'text-warn-dark' }[state] || 'text-slate-500');
   if (state === 'recording') { mic.classList.add('recording'); s.textContent = 'Listening. Release to send.'; }
@@ -208,22 +219,38 @@ function ui(state) {
 }
 
 async function press(e) {
-  e && e.preventDefault();
+  e && e.preventDefault && e.preventDefault();
   if (busy || recorder.active || !phone) return;
   try { mic.setPointerCapture && e && e.pointerId != null && mic.setPointerCapture(e.pointerId); } catch (_) {}
   ui('recording');
-  try { await recorder.start(); } catch (err) { ui('idle'); SH.toast(err.message, 'error'); }
+  try {
+    await recorder.start();
+  } catch (err) {
+    busy = false; ui('idle');
+    SH.toast(err.message, 'error');
+  }
 }
 
 async function release(e) {
-  e && e.preventDefault();
+  e && e.preventDefault && e.preventDefault();
   if (!recorder.active) return;
   busy = true; ui('thinking');
-  const clip = await recorder.stop();
-  if (clip.blob.size < 2000) {
+
+  let clip = null;
+  try {
+    clip = await recorder.stop();
+  } catch (err) {
     busy = false; ui('idle');
-    return SH.toast('Too short. Hold the button and speak for at least 2 seconds.', 'error');
+    return SH.toast(err.message, 'error');
   }
+  // null = the mic never started (permission refused) or the recording was cancelled
+  if (!clip) { busy = false; ui('idle'); return; }
+
+  if (clip.durationMs < MIN_HOLD_MS) {
+    busy = false; ui('idle');
+    return SH.toast('Too short. Keep holding the button while you speak, then release.', 'error');
+  }
+
   const form = new FormData();
   form.append('audio', clip.blob, clip.filename);
   form.append('phone_number', phone);
@@ -281,6 +308,10 @@ mic.addEventListener('pointerup', release);
 mic.addEventListener('pointercancel', release);
 mic.addEventListener('keydown', (e) => { if (e.code === 'Space' && !e.repeat) press(e); });
 mic.addEventListener('keyup', (e) => { if (e.code === 'Space') release(e); });
+
+// Never leave the mic open if the user switches app or locks the phone mid-recording.
+document.addEventListener('visibilitychange', () => { if (document.hidden && recorder.active) release(); });
+window.addEventListener('pagehide', () => { if (recorder.active) recorder.cancel(); });
 
 // ---- Messages ----
 function addMessage(text, role, audioUrl) {
