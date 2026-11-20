@@ -58,6 +58,9 @@
     finally { btn.disabled = false; btn.innerHTML = original; }
   }
 
+  // ==========================================
+  // ROBUST RECORDER (NO AUTO-STOP ON SILENCE)
+  // ==========================================
   class Recorder {
     constructor() {
       this.rec = null;
@@ -68,41 +71,148 @@
       this.waiter = null;
       this.done = null;
     }
+
     static mime() {
-      const options = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg'];
+      const options = [
+        'audio/webm;codecs=opus',
+        'audio/webm',
+        'audio/ogg;codecs=opus',
+        'audio/mp4'
+      ];
       return options.find((t) => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || '';
     }
-    get active() { return this.starting || (this.rec && this.rec.state === 'recording'); }
+
+    get active() { 
+      return this.starting || (this.rec && this.rec.state === 'recording'); 
+    }
+
     async start() {
       if (this.active) return;
-      this.starting = true; this.stopWanted = false; this.chunks = []; this.done = null;
+      this.starting = true; 
+      this.stopWanted = false; 
+      this.chunks = []; 
+      this.done = null;
+
       try {
-        this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        // Tuned constraints: noiseSuppression: false prevents Chrome from killing audio during silent pauses
+        this.stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: false, // Critical: stops browser from muting silence
+            autoGainControl: true
+          }
+        });
       } catch (err) {
         this.starting = false;
         throw new Error('Microphone blocked. Allow microphone access in your browser settings.');
       }
+
       const mimeType = Recorder.mime();
       this.rec = new MediaRecorder(this.stream, mimeType ? { mimeType } : undefined);
-      this.rec.ondataavailable = (e) => e.data.size && this.chunks.push(e.data);
+      
+      this.rec.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) {
+          this.chunks.push(e.data);
+        }
+      };
+
       this.rec.onstop = () => {
         const type = this.rec.mimeType || 'audio/webm';
         const ext = type.includes('mp4') ? 'm4a' : type.includes('ogg') ? 'ogg' : 'webm';
-        this.stream.getTracks().forEach((t) => t.stop());
-        this.done = { blob: new Blob(this.chunks, { type }), filename: `recording.${ext}` };
-        if (this.waiter) this.waiter(this.done);
+        
+        // Safely close audio tracks
+        if (this.stream) {
+          this.stream.getTracks().forEach((t) => t.stop());
+        }
+
+        this.done = { 
+          blob: new Blob(this.chunks, { type }), 
+          filename: `recording.${ext}` 
+        };
+
+        if (this.waiter) {
+          this.waiter(this.done);
+          this.waiter = null;
+        }
       };
-      this.rec.start();
+
+      // Request data slices every 250ms (keeps buffers flowing smoothly during pauses)
+      this.rec.start(250);
       this.starting = false;
       if (this.stopWanted) this.rec.stop();
     }
+
     stop() {
       return new Promise((resolve) => {
         this.waiter = resolve;
         if (this.done) return resolve(this.done);
-        if (this.starting) { this.stopWanted = true; return; }
-        if (this.rec && this.rec.state === 'recording') this.rec.stop();
+        if (this.starting) { 
+          this.stopWanted = true; 
+          return; 
+        }
+        if (this.rec && this.rec.state === 'recording') {
+          this.rec.stop();
+        }
       });
+    }
+
+    /**
+     * Binds a button to WhatsApp-style Hold-to-Record.
+     * Prevents Chrome from triggering long-press menus or scroll-canceling while holding.
+     */
+    static bindHold(btn, { onStart, onStop, onError } = {}) {
+      if (!btn) return;
+
+      // Lock element from triggering context menu or gestures in Chrome
+      btn.style.touchAction = 'none';
+      btn.style.userSelect = 'none';
+      btn.style.webkitUserSelect = 'none';
+
+      const recorder = new Recorder();
+      let isHolding = false;
+
+      const startHold = async (e) => {
+        if (e) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+        if (isHolding) return;
+        isHolding = true;
+
+        try {
+          await recorder.start();
+          if (onStart) onStart();
+        } catch (err) {
+          isHolding = false;
+          if (onError) onError(err);
+        }
+      };
+
+      const stopHold = async (e) => {
+        if (e) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+        if (!isHolding) return;
+        isHolding = false;
+
+        try {
+          const res = await recorder.stop();
+          if (onStop) onStop(res);
+        } catch (err) {
+          if (onError) onError(err);
+        }
+      };
+
+      // Touch events (Mobile/Tablet Chrome)
+      btn.addEventListener('touchstart', startHold, { passive: false });
+      btn.addEventListener('touchend', stopHold, { passive: false });
+      btn.addEventListener('touchcancel', stopHold, { passive: false });
+
+      // Mouse events (Desktop testing)
+      btn.addEventListener('mousedown', startHold);
+      btn.addEventListener('mouseup', stopHold);
+      btn.addEventListener('mouseleave', stopHold);
     }
   }
 
