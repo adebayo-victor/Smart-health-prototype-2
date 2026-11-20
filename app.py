@@ -324,44 +324,68 @@ def _seg(seg, key, default=None):
 
 
 def transcribe(audio_file, language=None, prompt=STT_PROMPT_CLINIC):
-    """Whisper transcription that refuses silence and hallucinated filler instead of passing it on."""
+    """Whisper transcription with bulletproof file extension handling."""
     data = audio_file.read()
+    logger.info(f"🎤 Received audio: {len(data)} bytes, mimetype: {audio_file.mimetype}, original filename: {audio_file.filename}")
+    
     if len(data) < MIN_AUDIO_BYTES:
         raise ValueError("Recording too short. Hold the button and speak clearly.")
-    
-    if len(data) > 5 * 1024 * 1024:
+    if len(data) > 10 * 1024 * 1024:
         raise ValueError("Recording too long. Please keep it under 2 minutes.")
 
-    # Browsers send 'audio/webm;codecs=opus'. Use the bare type and keep the filename for the extension.
-    mime = (audio_file.mimetype or "audio/webm").split(";")[0].strip()
+    # 1. Get the clean MIME type
+    mime = (audio_file.mimetype or "audio/webm").split(";")[0].strip().lower()
     
-    if mime not in ("audio/webm", "audio/ogg", "audio/mp4", "audio/wav"):
-        raise ValueError("Invalid audio format. Please use a supported browser.")
-        
-    filename = audio_file.filename or "audio.webm"
+    # 2. Force the correct extension based on MIME type (Groq is strict about this)
+    if "webm" in mime:
+        ext = "webm"
+    elif "ogg" in mime:
+        ext = "ogg"
+    elif "mp4" in mime or "m4a" in mime:
+        ext = "m4a"  # Groq prefers .m4a for MP4 audio containers
+    elif "wav" in mime:
+        ext = "wav"
+    else:
+        # Fallback to webm, which is the most common browser default
+        ext = "webm"
+        logger.warning(f"⚠️ Unknown mime type '{mime}', defaulting to .webm")
+
+    # 3. Create a clean filename that Groq will accept
+    filename = f"recording.{ext}"
+    logger.info(f"📤 Sending to Groq Whisper: {filename}, mime: {mime}, lang_hint: {language}")
 
     kwargs = dict(
         file=(filename, data, mime),
         model=WHISPER_MODEL,
-        response_format="verbose_json",   # per-segment confidence lets us reject silence
-        temperature=0.0,                  # deterministic; fewer invented words
+        response_format="verbose_json",
+        temperature=0.0,
         prompt=prompt,
     )
     if language in ("en", "ha"):
-        kwargs["language"] = language     # a hint beats auto-detect for Hausa and Pidgin
+        kwargs["language"] = language
 
-    result = get_groq().audio.transcriptions.create(**kwargs)
+    try:
+        result = get_groq().audio.transcriptions.create(**kwargs)
+    except Exception as e:
+        logger.error(f"❌ Groq Whisper API failed: {e}")
+        # Check if it's a known Groq file type error
+        err_str = str(e).lower()
+        if "file type" in err_str or "extension" in err_str or "format" in err_str:
+            raise ValueError(f"Audio format error. Your browser sent {mime}. Try using Chrome or Edge.")
+        raise ValueError(f"Speech service error: {str(e)}")
 
     segments = result.get("segments") if isinstance(result, dict) else getattr(result, "segments", None)
     full_text = (result.get("text") if isinstance(result, dict) else getattr(result, "text", "")) or ""
+    
+    logger.info(f"📝 Whisper RAW text: '{full_text[:150]}...'")
 
     if segments:
         kept = []
         for s in segments:
             no_speech = _seg(s, "no_speech_prob", 0.0) or 0.0
             logprob = _seg(s, "avg_logprob", 0.0) or 0.0
-            # Same rule Whisper's own decoder uses: probably silence AND low confidence.
             if no_speech > 0.6 and logprob < -1.0:
+                logger.debug(f"⏭️ Skipping silent segment: '{_seg(s, 'text', '')}'")
                 continue
             kept.append((_seg(s, "text", "") or "").strip())
         text = " ".join(t for t in kept if t).strip()
@@ -370,7 +394,10 @@ def transcribe(audio_file, language=None, prompt=STT_PROMPT_CLINIC):
 
     norm = re.sub(r"[^\w\s]", "", text.lower()).strip()
     if not norm or norm in WHISPER_GHOSTS or prompt.lower()[:30] in text.lower():
+        logger.warning(f"⚠️ Whisper returned ghost/silence: '{text}'")
         raise ValueError("No speech detected. Move closer, reduce background noise and try again.")
+        
+    logger.info(f"✅ Final cleaned text: '{text}'")
     return text
 
 
