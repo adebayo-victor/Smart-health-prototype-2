@@ -275,7 +275,7 @@ _llm = None
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-large-v3")
 MIN_AUDIO_BYTES = 2000   # about 0.5 s; one-word answers such as a town name must still pass
 # Short, plain prompts. A long prompt can get echoed back when the audio is silent.
-STT_PROMPT_CLINIC = "Health worker talking to a patient in Nigeria. Words like malaria, zazzabi, BP, temperature."
+STT_PROMPT_CLINIC = "Medical consultation in Nigeria. Focus only on clear speech. Ignore background noise, coughing, or pauses. Terms: malaria, zazzabi, BP, temperature, headache, stomach."
 STT_PROMPT_COMPANION = "A person in Nigeria talking about their health, or naming their town, such as Kano, Ibadan, Odeda."
 # Phrases Whisper tends to invent when it hears silence or noise.
 WHISPER_GHOSTS = {
@@ -328,9 +328,16 @@ def transcribe(audio_file, language=None, prompt=STT_PROMPT_CLINIC):
     data = audio_file.read()
     if len(data) < MIN_AUDIO_BYTES:
         raise ValueError("Recording too short. Hold the button and speak clearly.")
+    
+    if len(data) > 5 * 1024 * 1024:
+        raise ValueError("Recording too long. Please keep it under 2 minutes.")
 
     # Browsers send 'audio/webm;codecs=opus'. Use the bare type and keep the filename for the extension.
     mime = (audio_file.mimetype or "audio/webm").split(";")[0].strip()
+    
+    if mime not in ("audio/webm", "audio/ogg", "audio/mp4", "audio/wav"):
+        raise ValueError("Invalid audio format. Please use a supported browser.")
+        
     filename = audio_file.filename or "audio.webm"
 
     kwargs = dict(
