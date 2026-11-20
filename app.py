@@ -341,7 +341,7 @@ def _prompt_echo_detected(text, prompt):
 
 
 def transcribe(audio_file, language=None, prompt=STT_PROMPT_CLINIC):
-    """Whisper transcription that refuses silence, filler, AND prompt echoes."""
+    """Whisper transcription — NO prompt sent to Groq to prevent echo bugs."""
     data = audio_file.read()
     if len(data) < MIN_AUDIO_BYTES:
         raise ValueError("Recording too short. Hold the button and speak clearly.")
@@ -366,7 +366,8 @@ def transcribe(audio_file, language=None, prompt=STT_PROMPT_CLINIC):
         model=WHISPER_MODEL,
         response_format="verbose_json",
         temperature=0.0,
-        prompt=prompt,
+        # NOTE: prompt intentionally NOT sent. Whisper echoes prompt fragments
+        # as "transcription" when audio is silent/noisy. Removing it fixes that.
     )
     if language in ("en", "ha"):
         kwargs["language"] = language
@@ -389,13 +390,8 @@ def transcribe(audio_file, language=None, prompt=STT_PROMPT_CLINIC):
         text = full_text.strip()
 
     norm = re.sub(r"[^\w\s]", "", text.lower()).strip()
-
-    # Reject: empty, ghost phrases, OR prompt echoes (the bug you just hit)
     if not norm or norm in WHISPER_GHOSTS:
         raise ValueError("No speech detected. Move closer, reduce background noise and try again.")
-    if _prompt_echo_detected(text, prompt):
-        logger.warning("⚠️ Whisper echoed the prompt instead of transcribing speech. Audio likely silent/noisy.")
-        raise ValueError("No speech detected. The recording was too quiet or noisy. Try again.")
 
     return text
 
