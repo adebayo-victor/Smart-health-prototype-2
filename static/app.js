@@ -59,17 +59,37 @@
   }
 
   // ==========================================
-  // ROBUST RECORDER (NO AUTO-STOP ON SILENCE)
+  // ROBUST RECORDER v2 (NO AUTO-STOP ON SILENCE)
+  // Hold-to-record, slide-to-cancel, keyboard support
   // ==========================================
   class Recorder {
-    constructor() {
+    /**
+     * @param {object}   [opts]
+     * @param {boolean}  [opts.noiseSuppression=false]
+     * @param {number}   [opts.bitrate=32000]  Opus speech is fine at 32 kbps: small uploads on weak networks
+     * @param {number}   [opts.maxMs=120000]   Hard cap on a single recording
+     * @param {function} [opts.onTick]         (elapsedMs) about every 250 ms
+     * @param {function} [opts.onLevel]        (0..1) mic level about every 80 ms, for a visual meter
+     * @param {function} [opts.onLimit]        called when maxMs is reached (call stop() there)
+     * @param {function} [opts.onError]        called if the recorder fails mid-recording
+     */
+    constructor({ noiseSuppression = false, bitrate = 32000, maxMs = 120000, onTick, onLevel, onLimit, onError } = {}) {
+      this.noiseSuppression = noiseSuppression;
+      this.bitrate = bitrate;
+      this.maxMs = maxMs;
+      this.onTick = onTick;
+      this.onLevel = onLevel;
+      this.onLimit = onLimit;
+      this.onError = onError;
+
+      this.state = 'idle'; // idle | starting | recording | stopping
       this.rec = null;
       this.stream = null;
       this.chunks = [];
-      this.stopWanted = false;
-      this.starting = false;
-      this.waiter = null;
-      this.done = null;
+      this.startedAt = 0;
+      this.startPromise = null;
+      this.audioCtx = null;
+      this.timers = [];
     }
 
     static mime() {
@@ -82,137 +102,312 @@
       return options.find((t) => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || '';
     }
 
-    get active() { 
-      return this.starting || (this.rec && this.rec.state === 'recording'); 
+    static get supported() {
+      return !!(navigator.mediaDevices?.getUserMedia && window.MediaRecorder);
     }
 
-    async start() {
-      if (this.active) return;
-      this.starting = true; 
-      this.stopWanted = false; 
-      this.chunks = []; 
-      this.done = null;
+    get active() {
+      return this.state === 'starting' || this.state === 'recording';
+    }
+
+    get elapsedMs() {
+      return this.state === 'recording' ? performance.now() - this.startedAt : 0;
+    }
+
+    static explain(err) {
+      const name = err && err.name;
+      if (name === 'NotAllowedError' || name === 'SecurityError')
+        return 'Microphone blocked. Allow microphone access in your browser settings.';
+      if (name === 'NotFoundError' || name === 'OverconstrainedError')
+        return 'No microphone found on this device.';
+      if (name === 'NotReadableError' || name === 'AbortError')
+        return 'The microphone is being used by another app. Close it and try again.';
+      return (err && err.message) || 'Could not start recording.';
+    }
+
+    start() {
+      if (this.state !== 'idle') return this.startPromise || Promise.resolve();
+      this.state = 'starting';
+      this.chunks = [];
+      this.startPromise = this._start().catch((err) => {
+        this._release();
+        this.state = 'idle';
+        throw err;
+      });
+      return this.startPromise;
+    }
+
+    async _start() {
+      if (!window.isSecureContext) throw new Error('Recording needs a secure (HTTPS) connection.');
+      if (!Recorder.supported) throw new Error('This browser cannot record audio. Try Chrome.');
 
       try {
-        // Tuned constraints: noiseSuppression: false prevents Chrome from killing audio during silent pauses
+        // noiseSuppression is configurable (default false, as in the original tuning)
         this.stream = await navigator.mediaDevices.getUserMedia({
           audio: {
+            channelCount: 1,
             echoCancellation: true,
-            noiseSuppression: false, // Critical: stops browser from muting silence
+            noiseSuppression: this.noiseSuppression,
             autoGainControl: true
           }
         });
       } catch (err) {
-        this.starting = false;
-        throw new Error('Microphone blocked. Allow microphone access in your browser settings.');
+        throw new Error(Recorder.explain(err));
       }
 
       const mimeType = Recorder.mime();
-      this.rec = new MediaRecorder(this.stream, mimeType ? { mimeType } : undefined);
-      
+      const opts = { audioBitsPerSecond: this.bitrate };
+      if (mimeType) opts.mimeType = mimeType;
+
+      try {
+        this.rec = new MediaRecorder(this.stream, opts);
+      } catch (_) {
+        this.rec = new MediaRecorder(this.stream); // fall back to browser defaults
+      }
+
       this.rec.ondataavailable = (e) => {
-        if (e.data && e.data.size > 0) {
-          this.chunks.push(e.data);
-        }
+        if (e.data && e.data.size > 0) this.chunks.push(e.data);
+      };
+      this.rec.onerror = () => {
+        const wasActive = this.state === 'recording';
+        this._release();
+        this.chunks = [];
+        this.state = 'idle';
+        if (wasActive && this.onError) this.onError(new Error('Recording failed. Please try again.'));
       };
 
-      this.rec.onstop = () => {
-        const type = this.rec.mimeType || 'audio/webm';
-        const ext = type.includes('mp4') ? 'm4a' : type.includes('ogg') ? 'ogg' : 'webm';
-        
-        // Safely close audio tracks
-        if (this.stream) {
-          this.stream.getTracks().forEach((t) => t.stop());
-        }
-
-        this.done = { 
-          blob: new Blob(this.chunks, { type }), 
-          filename: `recording.${ext}` 
-        };
-
-        if (this.waiter) {
-          this.waiter(this.done);
-          this.waiter = null;
-        }
-      };
-
-      // Request data slices every 250ms (keeps buffers flowing smoothly during pauses)
+      // 250 ms slices keep data flowing, so little is lost if the tab dies
       this.rec.start(250);
-      this.starting = false;
-      if (this.stopWanted) this.rec.stop();
+      this.startedAt = performance.now();
+      this.state = 'recording';
+
+      if (this.onTick) {
+        this.timers.push(setInterval(() => this.onTick(this.elapsedMs), 250));
+      }
+      if (this.maxMs) {
+        this.timers.push(setTimeout(() => this.onLimit && this.onLimit(), this.maxMs));
+      }
+      this._startMeter();
     }
 
-    stop() {
-      return new Promise((resolve) => {
-        this.waiter = resolve;
-        if (this.done) return resolve(this.done);
-        if (this.starting) { 
-          this.stopWanted = true; 
-          return; 
-        }
-        if (this.rec && this.rec.state === 'recording') {
-          this.rec.stop();
-        }
-      });
+    _startMeter() {
+      if (!this.onLevel) return;
+      try {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return;
+        this.audioCtx = new AC();
+        const src = this.audioCtx.createMediaStreamSource(this.stream);
+        const analyser = this.audioCtx.createAnalyser();
+        analyser.fftSize = 256;
+        src.connect(analyser);
+        const buf = new Uint8Array(analyser.fftSize);
+        this.timers.push(setInterval(() => {
+          analyser.getByteTimeDomainData(buf);
+          let sum = 0;
+          for (let i = 0; i < buf.length; i++) {
+            const d = (buf[i] - 128) / 128;
+            sum += d * d;
+          }
+          this.onLevel(Math.min(1, Math.sqrt(sum / buf.length) * 3));
+        }, 80));
+      } catch (_) { /* meter is optional */ }
+    }
+
+    _release() {
+      this.timers.forEach((t) => { clearInterval(t); clearTimeout(t); });
+      this.timers = [];
+      if (this.stream) this.stream.getTracks().forEach((t) => t.stop());
+      this.stream = null;
+      if (this.audioCtx) this.audioCtx.close().catch(() => {});
+      this.audioCtx = null;
     }
 
     /**
-     * Binds a button to WhatsApp-style Hold-to-Record.
-     * Prevents Chrome from triggering long-press menus or scroll-canceling while holding.
+     * Stops recording.
+     * Resolves { blob, filename, durationMs, mimeType }, or null if cancelled / nothing was recording.
+     * Safe to call at any time, even while the mic permission prompt is still open.
      */
-    static bindHold(btn, { onStart, onStop, onError } = {}) {
-      if (!btn) return;
+    async stop({ cancel = false } = {}) {
+      if (this.state === 'starting') {
+        try { await this.startPromise; } catch (_) { return null; }
+      }
+      if (this.state !== 'recording') return null;
+
+      this.state = 'stopping';
+      const rec = this.rec;
+      const durationMs = performance.now() - this.startedAt;
+
+      await new Promise((resolve) => {
+        rec.onstop = resolve;
+        try {
+          if (rec.state !== 'inactive') rec.stop(); else resolve();
+        } catch (_) { resolve(); }
+      });
+
+      const type = (rec.mimeType || Recorder.mime() || 'audio/webm').split(';')[0];
+      const chunks = this.chunks;
+      this.chunks = [];
+      this._release();
+      this.rec = null;
+      this.state = 'idle';
+
+      if (cancel) return null;
+
+      const blob = new Blob(chunks, { type });
+      if (!blob.size) throw new Error('No audio was captured. Please try again.');
+
+      const ext = type.includes('mp4') ? 'm4a' : type.includes('ogg') ? 'ogg' : 'webm';
+      return { blob, filename: `recording.${ext}`, durationMs, mimeType: type };
+    }
+
+    cancel() { return this.stop({ cancel: true }); }
+
+    /**
+     * Binds a button to WhatsApp-style Hold-to-Record.
+     * Hold = record, release = send, slide left (or press Esc) = cancel.
+     * Also works with keyboard: hold Space or Enter while the button is focused.
+     * Prevents Chrome from triggering long-press menus or scroll-canceling while holding.
+     *
+     * Callbacks (all optional):
+     *   onStart()                    recording has actually begun (mic is live)
+     *   onStop({blob, filename, durationMs, mimeType})
+     *   onCancel()                   user slid away, or the recording was discarded
+     *   onError(err)                 mic problem, or the press was too short
+     *   onTick(ms), onLevel(0..1)    for a timer and level meter
+     *   onCancelArmed(bool)          true while the finger is past the cancel threshold
+     *
+     * Returns { recorder, destroy }.
+     */
+    static bindHold(btn, {
+      onStart, onStop, onCancel, onError, onTick, onLevel, onCancelArmed,
+      minMs = 600, cancelDragPx = 80, maxMs = 120000, noiseSuppression = false
+    } = {}) {
+      if (!btn) return null;
 
       // Lock element from triggering context menu or gestures in Chrome
       btn.style.touchAction = 'none';
       btn.style.userSelect = 'none';
       btn.style.webkitUserSelect = 'none';
+      btn.style.webkitTouchCallout = 'none';
 
-      const recorder = new Recorder();
-      let isHolding = false;
+      let holding = false;
+      let armed = false;
+      let startX = 0;
+      let pointerId = null;
 
-      const startHold = async (e) => {
-        if (e) {
-          e.preventDefault();
-          e.stopPropagation();
-        }
-        if (isHolding) return;
-        isHolding = true;
+      const recorder = new Recorder({
+        noiseSuppression, maxMs, onTick, onLevel,
+        onLimit: () => finish(false),
+        onError: (err) => { holding = false; setArmed(false); onError && onError(err); }
+      });
 
+      const buzz = (ms) => { try { navigator.vibrate && navigator.vibrate(ms); } catch (_) {} };
+      const setArmed = (v) => {
+        if (armed === v) return;
+        armed = v;
+        onCancelArmed && onCancelArmed(v);
+      };
+
+      const begin = async () => {
+        if (holding) return;
+        holding = true;
+        setArmed(false);
         try {
           await recorder.start();
-          if (onStart) onStart();
+          if (!holding) { // released while the permission prompt was open
+            await recorder.cancel();
+            return;
+          }
+          buzz(15);
+          onStart && onStart();
         } catch (err) {
-          isHolding = false;
-          if (onError) onError(err);
+          holding = false;
+          onError && onError(err);
         }
       };
 
-      const stopHold = async (e) => {
-        if (e) {
-          e.preventDefault();
-          e.stopPropagation();
-        }
-        if (!isHolding) return;
-        isHolding = false;
-
+      async function finish(cancel) {
+        if (!holding) return;
+        holding = false;
+        const wasArmed = armed;
+        setArmed(false);
         try {
-          const res = await recorder.stop();
-          if (onStop) onStop(res);
+          const res = await recorder.stop({ cancel: cancel || wasArmed });
+          if (!res) { onCancel && onCancel(); return; }
+          if (res.durationMs < minMs) {
+            onError && onError(new Error('Hold the button while you speak, then release.'));
+            return;
+          }
+          buzz(10);
+          onStop && onStop(res);
         } catch (err) {
-          if (onError) onError(err);
+          onError && onError(err);
         }
+      }
+
+      const down = (e) => {
+        if (e.pointerType === 'mouse' && e.button !== 0) return;
+        e.preventDefault();
+        pointerId = e.pointerId;
+        startX = e.clientX;
+        try { btn.setPointerCapture(pointerId); } catch (_) {}
+        begin();
+      };
+      const move = (e) => {
+        if (!holding || e.pointerId !== pointerId) return;
+        setArmed(startX - e.clientX > cancelDragPx);
+      };
+      const up = (e) => {
+        if (e.pointerId !== pointerId) return;
+        e.preventDefault();
+        pointerId = null;
+        finish(false);
+      };
+      const lost = () => { pointerId = null; finish(false); };
+      const noMenu = (e) => e.preventDefault();
+
+      const keyDown = (e) => {
+        if (e.repeat) return;
+        if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); begin(); }
+        else if (e.key === 'Escape') { finish(true); }
+      };
+      const keyUp = (e) => {
+        if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); finish(false); }
       };
 
-      // Touch events (Mobile/Tablet Chrome)
-      btn.addEventListener('touchstart', startHold, { passive: false });
-      btn.addEventListener('touchend', stopHold, { passive: false });
-      btn.addEventListener('touchcancel', stopHold, { passive: false });
+      // Never leave the mic open if the user switches app or the page goes away
+      const hide = () => { if (document.hidden) finish(false); };
+      const leave = () => finish(false);
 
-      // Mouse events (Desktop testing)
-      btn.addEventListener('mousedown', startHold);
-      btn.addEventListener('mouseup', stopHold);
-      btn.addEventListener('mouseleave', stopHold);
+      btn.addEventListener('pointerdown', down);
+      btn.addEventListener('pointermove', move);
+      btn.addEventListener('pointerup', up);
+      btn.addEventListener('pointercancel', lost);
+      btn.addEventListener('lostpointercapture', lost);
+      btn.addEventListener('contextmenu', noMenu);
+      btn.addEventListener('keydown', keyDown);
+      btn.addEventListener('keyup', keyUp);
+      btn.addEventListener('blur', leave);
+      document.addEventListener('visibilitychange', hide);
+      window.addEventListener('pagehide', leave);
+
+      return {
+        recorder,
+        destroy() {
+          finish(true);
+          btn.removeEventListener('pointerdown', down);
+          btn.removeEventListener('pointermove', move);
+          btn.removeEventListener('pointerup', up);
+          btn.removeEventListener('pointercancel', lost);
+          btn.removeEventListener('lostpointercapture', lost);
+          btn.removeEventListener('contextmenu', noMenu);
+          btn.removeEventListener('keydown', keyDown);
+          btn.removeEventListener('keyup', keyUp);
+          btn.removeEventListener('blur', leave);
+          document.removeEventListener('visibilitychange', hide);
+          window.removeEventListener('pagehide', leave);
+        }
+      };
     }
   }
 
