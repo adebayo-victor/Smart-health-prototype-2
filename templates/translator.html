@@ -29,23 +29,33 @@
 <section class="mb-6" aria-labelledby="s2">
   <h2 id="s2" class="text-sm font-bold text-slate-500 mb-3">Step 2. Record the patient</h2>
 
+  <div class="flex items-center gap-2 mb-3">
+    <label for="speechLang" class="text-sm font-semibold text-slate-600 shrink-0">Patient speaks</label>
+    <select id="speechLang" class="flex-1 min-w-0 min-h-11 px-3 rounded-xl border border-slate-300 bg-white text-sm font-semibold">
+      <option value="">Not sure (auto-detect)</option>
+      <option value="en">English or Pidgin</option>
+      <option value="ha">Hausa</option>
+    </select>
+  </div>
+
   <div id="recordingUI" class="hidden space-y-3">
     <div class="w-full h-16 bg-ink rounded-xl flex items-center justify-center gap-1.5" aria-hidden="true">
       {% for h in [4, 8, 6, 10, 5, 9, 4] %}
-        <div class="w-1.5 bg-danger rounded-full animate-pulse" style="height: {{ h * 4 }}px; animation-delay: {{ loop.index0 * 0.1 }}s"></div>
+        <div class="wave-bar w-1.5 bg-danger rounded-full animate-pulse transition-transform duration-75" style="height: {{ h * 4 }}px; animation-delay: {{ loop.index0 * 0.1 }}s"></div>
       {% endfor %}
     </div>
     <div class="flex items-center justify-between text-sm font-bold text-danger px-1" role="status">
       <span class="flex items-center gap-2"><span class="w-2.5 h-2.5 bg-danger rounded-full animate-pulse"></span>Recording</span>
       <span id="timerDisplay" class="tabular-nums">00:00</span>
     </div>
-    <button id="stopBtn" class="w-full min-h-14 bg-slate-200 text-ink rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-slate-300 transition">
+    <p class="text-xs text-slate-500 px-1">Speak close to the phone. Tap Stop when the patient has finished.</p>
+    <button id="stopBtn" class="w-full min-h-14 bg-slate-200 text-ink rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-slate-300 transition disabled:opacity-60">
       <svg class="h-4 w-4" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6h12v12H6z"/></svg>Stop recording
     </button>
   </div>
 
   <div id="idleUI" class="grid grid-cols-2 gap-3">
-    <button id="recordBtn" class="min-h-14 bg-brand text-white rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-brand-dark transition">
+    <button id="recordBtn" class="min-h-14 bg-brand text-white rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-brand-dark transition disabled:opacity-60">
       {{ icon('mic', 'h-5 w-5') }}Record live
     </button>
     <input type="file" id="fileInput" accept="audio/*" class="hidden">
@@ -145,33 +155,94 @@ $('playBtn').addEventListener('click', async (e) => {
 });
 
 // ---- Step 2: Audio Recording ----
-const recorder = new SH.Recorder();
-let audio = null, timer = null;
+const MIN_MS = 1500; // anything shorter is almost always an accidental tap
+const bars = Array.from(document.querySelectorAll('#recordingUI .wave-bar'));
+const fmtClock = (ms) => {
+  const s = Math.floor(ms / 1000);
+  return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+};
 
-function loaded(name, size) {
+let audio = null;
+let finishing = false;
+
+const recorder = new SH.Recorder({
+  maxMs: 120000,
+  onTick: (ms) => { $('timerDisplay').textContent = fmtClock(ms); },
+  onLevel: (lv) => bars.forEach((b, i) => {
+    b.style.transform = `scaleY(${Math.min(1.4, 0.3 + lv * (0.9 + (i % 3) * 0.4))})`;
+  }),
+  onLimit: () => { SH.toast('Maximum length reached. Recording stopped.', 'warn'); finishRecording(); },
+  onError: (err) => { resetRecordingUI(); SH.toast(err.message, 'error'); }
+});
+
+function resetRecordingUI() {
+  show('recordingUI', false);
+  show('idleUI');
+  $('recordBtn').disabled = false;
+  $('stopBtn').disabled = false;
+}
+
+function loaded(name, size, durationMs) {
   show('idleUI', false); show('recordingUI', false); show('audioLoadedUI'); show('translateBtn');
   $('audioFileName').textContent = name;
-  $('audioFileSize').textContent = (size / 1024).toFixed(1) + ' KB, ready to process';
+  const secs = durationMs ? ', ' + Math.round(durationMs / 1000) + ' sec' : '';
+  $('audioFileSize').textContent = (size / 1024).toFixed(1) + ' KB' + secs + ', ready to process';
 }
-function clearAudio() { audio = null; show('audioLoadedUI', false); show('translateBtn', false); show('idleUI'); }
 
-$('recordBtn').addEventListener('click', async () => {
+function clearAudio() {
+  audio = null;
+  show('audioLoadedUI', false); show('recordingUI', false); show('translateBtn', false); show('idleUI');
+  $('recordBtn').disabled = false;
+  $('stopBtn').disabled = false;
+}
+
+$('recordBtn').addEventListener('click', async (e) => {
+  const btn = e.currentTarget;
+  btn.disabled = true; // stops double taps while the permission prompt is open
   try {
     await recorder.start();
     show('idleUI', false); show('recordingUI'); show('audioLoadedUI', false); show('translateBtn', false);
-    let s = 0; $('timerDisplay').textContent = '00:00';
-    timer = setInterval(() => { s++; $('timerDisplay').textContent = String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0'); }, 1000);
-  } catch (err) { SH.toast(err.message, 'error'); }
+    $('timerDisplay').textContent = '00:00';
+  } catch (err) {
+    SH.toast(err.message, 'error');
+  } finally {
+    btn.disabled = false;
+  }
 });
-$('stopBtn').addEventListener('click', async () => {
-  clearInterval(timer);
-  audio = await recorder.stop();
-  loaded('Recorded audio', audio.blob.size);
-});
+
+async function finishRecording() {
+  if (finishing) return;
+  finishing = true;
+  $('stopBtn').disabled = true;
+  try {
+    const res = await recorder.stop();
+    if (!res) { resetRecordingUI(); return; }
+    if (res.durationMs < MIN_MS) {
+      clearAudio();
+      SH.toast('That was too short. Record at least 2 seconds.', 'warn');
+      return;
+    }
+    audio = res;
+    loaded('Recorded audio', res.blob.size, res.durationMs);
+  } catch (err) {
+    clearAudio();
+    SH.toast(err.message, 'error');
+  } finally {
+    finishing = false;
+  }
+}
+
+$('stopBtn').addEventListener('click', finishRecording);
+
+// Keep what was recorded if the user switches app or locks the phone mid-recording.
+document.addEventListener('visibilitychange', () => { if (document.hidden && recorder.active) finishRecording(); });
+window.addEventListener('pagehide', () => { if (recorder.active) recorder.cancel(); });
+
 $('uploadBtn').addEventListener('click', () => $('fileInput').click());
 $('fileInput').addEventListener('change', (e) => {
   const f = e.target.files[0];
   if (f) { audio = { blob: f, filename: f.name }; loaded(f.name, f.size); }
+  e.target.value = ''; // lets the same file be picked again after Clear
 });
 $('clearBtn').addEventListener('click', clearAudio);
 
@@ -186,6 +257,8 @@ $('translateBtn').addEventListener('click', async (e) => {
   show('errorState', false); show('resultsArea', false); show('nextStepsArea', false);
   const form = new FormData();
   form.append('audio', audio.blob, audio.filename);
+  const lang = $('speechLang').value;
+  if (lang) form.append('language', lang); // hint for the speech model; omitted = auto-detect
 
   try {
     extractedData = await SH.busy(e.currentTarget, 'Transcribing and extracting', () => SH.api('/api/translate', { form }));
@@ -197,17 +270,21 @@ $('translateBtn').addEventListener('click', async (e) => {
 });
 $('dismissBtn').addEventListener('click', () => { show('errorState', false); clearAudio(); });
 
-const known = (v) => v && String(v).toUpperCase() !== 'N/A';
+const known = (v) => v !== null && v !== undefined && v !== '' && String(v).toUpperCase() !== 'N/A';
 
 function renderIntakeView(d) {
   tcResults = {};
 
+  // The server returns triage-style keys (sys_bp, dia_bp, ...). Older replies used bp_sys / bp_dia.
   const v = d.vitals || {};
+  const sys = v.sys_bp ?? v.bp_sys;
+  const dia = v.dia_bp ?? v.bp_dia;
+  const hr = v.hr ?? v.heart_rate;
   const vParts = [];
   if (known(v.temp)) vParts.push(`Temp ${v.temp}°C`);
-  if (known(v.bp_sys) && known(v.bp_dia)) vParts.push(`BP ${v.bp_sys}/${v.bp_dia}`);
+  if (known(sys) && known(dia)) vParts.push(`BP ${sys}/${dia}`);
   if (known(v.spo2)) vParts.push(`SpO2 ${v.spo2}%`);
-  if (known(v.heart_rate)) vParts.push(`HR ${v.heart_rate} bpm`);
+  if (known(hr)) vParts.push(`HR ${hr} bpm`);
 
   $('translationCard').innerHTML = `
     <div class="flex items-center justify-between pb-2 border-b border-slate-100 text-xs">
