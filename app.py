@@ -323,36 +323,43 @@ def _seg(seg, key, default=None):
     return seg.get(key, default) if isinstance(seg, dict) else getattr(seg, key, default)
 
 
+def _prompt_echo_detected(text, prompt):
+    """True if the transcription contains a suspicious multi-word slice of the prompt."""
+    if not text:
+        return False
+    # Normalize both sides
+    t_norm = re.sub(r"[^\w\s]", "", text.lower())
+    t_words = t_norm.split()
+    p_words = re.sub(r"[^\w\s]", "", prompt.lower()).split()
+    # Build all 4-word shingles from the prompt
+    shingles = {" ".join(p_words[i:i + 4]) for i in range(len(p_words) - 3)}
+    # If any 4-word window of the transcription matches a prompt shingle → echo
+    for i in range(len(t_words) - 3):
+        if " ".join(t_words[i:i + 4]) in shingles:
+            return True
+    return False
+
+
 def transcribe(audio_file, language=None, prompt=STT_PROMPT_CLINIC):
-    """Whisper transcription with bulletproof file extension handling."""
+    """Whisper transcription that refuses silence, filler, AND prompt echoes."""
     data = audio_file.read()
-    logger.info(f"🎤 Received audio: {len(data)} bytes, mimetype: {audio_file.mimetype}, original filename: {audio_file.filename}")
-    
     if len(data) < MIN_AUDIO_BYTES:
         raise ValueError("Recording too short. Hold the button and speak clearly.")
     if len(data) > 10 * 1024 * 1024:
         raise ValueError("Recording too long. Please keep it under 2 minutes.")
 
-    # 1. Get the clean MIME type
     mime = (audio_file.mimetype or "audio/webm").split(";")[0].strip().lower()
-    
-    # 2. Force the correct extension based on MIME type (Groq is strict about this)
     if "webm" in mime:
         ext = "webm"
     elif "ogg" in mime:
         ext = "ogg"
     elif "mp4" in mime or "m4a" in mime:
-        ext = "m4a"  # Groq prefers .m4a for MP4 audio containers
+        ext = "m4a"
     elif "wav" in mime:
         ext = "wav"
     else:
-        # Fallback to webm, which is the most common browser default
         ext = "webm"
-        logger.warning(f"⚠️ Unknown mime type '{mime}', defaulting to .webm")
-
-    # 3. Create a clean filename that Groq will accept
     filename = f"recording.{ext}"
-    logger.info(f"📤 Sending to Groq Whisper: {filename}, mime: {mime}, lang_hint: {language}")
 
     kwargs = dict(
         file=(filename, data, mime),
@@ -364,20 +371,10 @@ def transcribe(audio_file, language=None, prompt=STT_PROMPT_CLINIC):
     if language in ("en", "ha"):
         kwargs["language"] = language
 
-    try:
-        result = get_groq().audio.transcriptions.create(**kwargs)
-    except Exception as e:
-        logger.error(f"❌ Groq Whisper API failed: {e}")
-        # Check if it's a known Groq file type error
-        err_str = str(e).lower()
-        if "file type" in err_str or "extension" in err_str or "format" in err_str:
-            raise ValueError(f"Audio format error. Your browser sent {mime}. Try using Chrome or Edge.")
-        raise ValueError(f"Speech service error: {str(e)}")
+    result = get_groq().audio.transcriptions.create(**kwargs)
 
     segments = result.get("segments") if isinstance(result, dict) else getattr(result, "segments", None)
     full_text = (result.get("text") if isinstance(result, dict) else getattr(result, "text", "")) or ""
-    
-    logger.info(f"📝 Whisper RAW text: '{full_text[:150]}...'")
 
     if segments:
         kept = []
@@ -385,7 +382,6 @@ def transcribe(audio_file, language=None, prompt=STT_PROMPT_CLINIC):
             no_speech = _seg(s, "no_speech_prob", 0.0) or 0.0
             logprob = _seg(s, "avg_logprob", 0.0) or 0.0
             if no_speech > 0.6 and logprob < -1.0:
-                logger.debug(f"⏭️ Skipping silent segment: '{_seg(s, 'text', '')}'")
                 continue
             kept.append((_seg(s, "text", "") or "").strip())
         text = " ".join(t for t in kept if t).strip()
@@ -393,11 +389,14 @@ def transcribe(audio_file, language=None, prompt=STT_PROMPT_CLINIC):
         text = full_text.strip()
 
     norm = re.sub(r"[^\w\s]", "", text.lower()).strip()
-    if not norm or norm in WHISPER_GHOSTS or prompt.lower()[:30] in text.lower():
-        logger.warning(f"⚠️ Whisper returned ghost/silence: '{text}'")
+
+    # Reject: empty, ghost phrases, OR prompt echoes (the bug you just hit)
+    if not norm or norm in WHISPER_GHOSTS:
         raise ValueError("No speech detected. Move closer, reduce background noise and try again.")
-        
-    logger.info(f"✅ Final cleaned text: '{text}'")
+    if _prompt_echo_detected(text, prompt):
+        logger.warning("⚠️ Whisper echoed the prompt instead of transcribing speech. Audio likely silent/noisy.")
+        raise ValueError("No speech detected. The recording was too quiet or noisy. Try again.")
+
     return text
 
 
