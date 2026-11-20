@@ -65,15 +65,15 @@
   class Recorder {
     /**
      * @param {object}   [opts]
-     * @param {boolean}  [opts.noiseSuppression=false]
-     * @param {number}   [opts.bitrate=32000]  Opus speech is fine at 32 kbps: small uploads on weak networks
+     * @param {boolean}  [opts.noiseSuppression=true]  Enabled to filter out background clinic noise
+     * @param {number}   [opts.bitrate=48000]  48 kbps Opus: balances small uploads with clear voice preservation
      * @param {number}   [opts.maxMs=120000]   Hard cap on a single recording
      * @param {function} [opts.onTick]         (elapsedMs) about every 250 ms
      * @param {function} [opts.onLevel]        (0..1) mic level about every 80 ms, for a visual meter
      * @param {function} [opts.onLimit]        called when maxMs is reached (call stop() there)
      * @param {function} [opts.onError]        called if the recorder fails mid-recording
      */
-    constructor({ noiseSuppression = false, bitrate = 32000, maxMs = 120000, onTick, onLevel, onLimit, onError } = {}) {
+    constructor({ noiseSuppression = true, bitrate = 48000, maxMs = 120000, onTick, onLevel, onLimit, onError } = {}) {
       this.noiseSuppression = noiseSuppression;
       this.bitrate = bitrate;
       this.maxMs = maxMs;
@@ -142,7 +142,7 @@
       if (!Recorder.supported) throw new Error('This browser cannot record audio. Try Chrome.');
 
       try {
-        // noiseSuppression is configurable (default false, as in the original tuning)
+        // noiseSuppression is now enabled by default to filter clinic background noise
         this.stream = await navigator.mediaDevices.getUserMedia({
           audio: {
             channelCount: 1,
@@ -280,7 +280,7 @@
      */
     static bindHold(btn, {
       onStart, onStop, onCancel, onError, onTick, onLevel, onCancelArmed,
-      minMs = 600, cancelDragPx = 80, maxMs = 120000, noiseSuppression = false
+      minMs = 600, cancelDragPx = 80, maxMs = 120000, noiseSuppression = true
     } = {}) {
       if (!btn) return null;
 
