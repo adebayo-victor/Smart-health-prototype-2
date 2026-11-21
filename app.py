@@ -30,7 +30,8 @@ from flask_sqlalchemy import SQLAlchemy
 from groq import Groq
 from gtts import gTTS
 from openai import OpenAI
-from sqlalchemy import func
+from sqlalchemy import func, inspect as sa_inspect, text as sql_text
+from sqlalchemy.exc import IntegrityError
 from flask.sessions import SecureCookieSessionInterface
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -204,6 +205,10 @@ class Encounter(db.Model):
     referral_facility = db.Column(db.String(100), nullable=True)
     referral_code = db.Column(db.String(20), nullable=True, unique=True)
     referral_qr = db.Column(db.Text, nullable=True)
+    # Companion (patient portal) passes belong to ONE companion user, so one phone's code never shows in another's chat.
+    companion_user_id = db.Column(db.Integer, db.ForeignKey("companion_user.id"), nullable=True, index=True)
+    pass_hospitals = db.Column(db.Text, nullable=True)      # nearby hospitals listed on an open emergency pass
+    pass_location = db.Column(db.String(100), nullable=True)  # town/area the patient spoke
     origin_worker_id = db.Column(db.Integer, db.ForeignKey("worker.id"), nullable=True)
     origin_facility_id = db.Column(db.Integer, db.ForeignKey("medical_center.id"), nullable=True)
     destination_facility_id = db.Column(db.Integer, db.ForeignKey("medical_center.id"), nullable=True)
@@ -273,8 +278,34 @@ def seed_demo_data():
     db.session.commit()
 
 
+def ensure_columns():
+    """db.create_all() creates missing TABLES but never adds columns to an existing one.
+    Add the new Encounter columns on databases created before this change (SQLite and PostgreSQL)."""
+    wanted = {"companion_user_id": "INTEGER", "pass_hospitals": "TEXT", "pass_location": "VARCHAR(100)"}
+    try:
+        have = {c["name"] for c in sa_inspect(db.engine).get_columns("encounter")}
+    except Exception:
+        logger.exception("Could not inspect the encounter table")
+        return
+    for name, ddl in wanted.items():
+        if name in have:
+            continue
+        try:
+            db.session.execute(sql_text(f"ALTER TABLE encounter ADD COLUMN {name} {ddl}"))
+            db.session.commit()
+            logger.info("Added encounter.%s", name)
+        except Exception:  # another gunicorn worker may have added it a moment ago
+            db.session.rollback()
+    try:
+        db.session.execute(sql_text("CREATE INDEX IF NOT EXISTS ix_encounter_companion_user_id ON encounter (companion_user_id)"))
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+
+
 with app.app_context():
     db.create_all()
+    ensure_columns()
     seed_demo_data()
 
 
@@ -332,12 +363,15 @@ def get_groq():
 def get_llm():
     global _llm
     if _llm is None:
-        _llm = OpenAI(api_key=os.getenv("LITELLM_API_KEY"), base_url=os.getenv("LITELLM_BASE_URL"))
+        # The OpenAI client defaults to a 10 minute timeout and 2 retries; a stalled proxy would freeze a worker.
+        _llm = OpenAI(api_key=os.getenv("LITELLM_API_KEY"), base_url=os.getenv("LITELLM_BASE_URL"),
+                      timeout=float(os.getenv("LLM_TIMEOUT", "30")), max_retries=1)
     return _llm
 
 
-def llm_text(messages, temperature=0.2):
-    resp = get_llm().chat.completions.create(model=LLM_MODEL, messages=messages, temperature=temperature)
+def llm_text(messages, temperature=0.2, max_tokens=None):
+    kwargs = {"max_tokens": max_tokens} if max_tokens else {}
+    resp = get_llm().chat.completions.create(model=LLM_MODEL, messages=messages, temperature=temperature, **kwargs)
     return resp.choices[0].message.content.strip()
 
 
@@ -373,23 +407,23 @@ def gemini_translate(text, target="English", lang_hint=None):
             lang_line = "The source language is Hausa."
         elif lang_hint == "en":
             lang_line = "The source language is English or Nigerian Pidgin."
-            prompt = (
-                "You are a forensic sociolinguist and low-resource language reconstruction specialist fluent in "
-                "Hausa, Nigerian Pidgin, and English. The input below is a noisy voice-to-text transcript that may "
-                "contain phonetic misspellings, missing diacritics, merged or split words, broken spacing, and "
-                "jumbled word order. Silently execute this reconstruction pipeline before answering: "
-                "(1) break the transcript into individual words and phonetic fragments, "
-                "(2) map each token to its likely intended word and candidate meaning, "
-                "(3) test adjacent words and neighboring clauses side by side—merging split syllables, separating "
-                "run-together words, and reordering scrambled segments until a coherent meaning emerges, "
-                "(4) check against literal nonsense to catch idioms or colloquial expressions, and "
-                "(5) synthesize the FULL intended meaning into clear, natural English. "
-                "HARD RULES: Output ONLY the final English translation. No quotes, no markdown, no notes, no "
-                "step-by-step output, and no left-over Hausa or Pidgin words. Do NOT add, guess, or invent any "
-                "medical symptoms or details that are not supported by the input. "
-                "If the input is already clear English, return it unchanged. "
-                f"{lang_line}\n\nInput: \"{text}\""
-            )
+        prompt = (
+            "You are a forensic sociolinguist and low-resource language reconstruction specialist fluent in "
+            "Hausa, Nigerian Pidgin, and English. The input below is a noisy voice-to-text transcript that may "
+            "contain phonetic misspellings, missing diacritics, merged or split words, broken spacing, and "
+            "jumbled word order. Silently execute this reconstruction pipeline before answering: "
+            "(1) break the transcript into individual words and phonetic fragments, "
+            "(2) map each token to its likely intended word and candidate meaning, "
+            "(3) test adjacent words and neighboring clauses side by side—merging split syllables, separating "
+            "run-together words, and reordering scrambled segments until a coherent meaning emerges, "
+            "(4) check against literal nonsense to catch idioms or colloquial expressions, and "
+            "(5) synthesize the FULL intended meaning into clear, natural English. "
+            "HARD RULES: Output ONLY the final English translation. No quotes, no markdown, no notes, no "
+            "step-by-step output, and no left-over Hausa or Pidgin words. Do NOT add, guess, or invent any "
+            "medical symptoms or details that are not supported by the input. "
+            "If the input is already clear English, return it unchanged. "
+            f"{lang_line}\n\nInput: \"{text}\""
+        )
 
     else:
         prompt = (
@@ -406,7 +440,7 @@ def gemini_translate(text, target="English", lang_hint=None):
             # so keep it generous or the visible answer can come back empty.
             generation_config=genai.types.GenerationConfig(temperature=0.1, max_output_tokens=2048),
             safety_settings=_GEMINI_SAFETY,
-            request_options={"timeout": 25},
+            request_options={"timeout": int(os.getenv("GEMINI_TIMEOUT", "15"))},
         )
         out = (response.text or "").strip().strip('"\'')
         if not out:
@@ -889,7 +923,8 @@ def service_worker():
 @login_required
 def dashboard():
     facility_id = session["facility_id"]
-    scope = Encounter.facility_id == facility_id
+    scope = db.and_(Encounter.facility_id == facility_id,
+                    db.or_(Encounter.referral_status.is_(None), Encounter.referral_status != "revoked"))
 
     tier = request.args.get("tier", "all").upper()
     stage = request.args.get("stage", "all").lower()
@@ -1063,6 +1098,7 @@ def translate_audio():
     if not audio_file:
         return fail("No audio file provided.", 400)
 
+    t0 = time.time()
     # Optional hint from the "Patient speaks" selector. None means auto-detect.
     lang = STT_LANGS.get((request.form.get("language") or "").lower())
 
@@ -1077,7 +1113,9 @@ def translate_audio():
         return fail("Could not transcribe the audio. Check connection and try again.", 502, e)
 
     # STAGE 2: Gemini translates. None means Gemini is unavailable, and LiteLLM translates in stage 3.
+    t1 = time.time()
     translation = gemini_translate(raw_text, "English", lang)
+    t2 = time.time()
 
     # STAGE 3: LiteLLM analyses. It no longer has to translate: it reads the clean English and extracts from it.
     if translation:
@@ -1123,6 +1161,9 @@ def translate_audio():
         data = llm_json(prompt, 0.2)
     except Exception as e:
         return fail("The AI returned unreadable data. Please try again.", 502, e)
+
+    logger.info("translate timing: whisper=%.1fs gemini=%.1fs analysis=%.1fs total=%.1fs",
+                t1 - t0, t2 - t1, time.time() - t2, time.time() - t0)
 
     # Never let the model rewrite the transcript: the record must hold exactly what was heard.
     data["statement"] = raw_text
@@ -1384,6 +1425,9 @@ def lookup_patient():
     if not src:
         return fail("No patient found with this code.", 404)
 
+    if src.referral_status == "revoked":
+        return fail("This referral code was cancelled by the patient and is no longer valid.", 410)
+
     current_fid = session["facility_id"]
     current_fname = session.get("facility_name")
 
@@ -1459,73 +1503,221 @@ EMERGENCY_PATTERNS = re.compile(
 )
 
 
-def answer_patient(user_text, translated_text, past_memories, recent_chat, pending_emergency=None):
-    pending_context = ""
-    if pending_emergency and pending_emergency.get("active"):
-        pending_context = f"""
-    ACTIVE EMERGENCY CONTEXT:
-    The patient reported an emergency: "{pending_emergency.get('reason')}".
-    We need their town/area to prepare a hospital referral.
-    - If the patient mentions where they are (town, city, area), extract it into "spoken_location".
-    - If not, answer their concern calmly, remind them this is an emergency, and ask what town/area they are in.
-    """
+# ---- Companion identity & passes: every phone number is its own private record ----
+# Whisper language for the companion. "ha" suits a mostly-Hausa user base; set COMPANION_STT_LANG=auto
+# to let Whisper detect the language instead (better when many users speak English or Pidgin).
+COMPANION_STT_LANG = (os.getenv("COMPANION_STT_LANG", "ha") or "").strip().lower()
+# Gemini translates the patient's Hausa/Pidgin to English BEFORE the LiteLLM model answers (on by default,
+# because Gemini is far better at Hausa). Set COMPANION_PRETRANSLATE=0 only to skip it for speed tests.
+COMPANION_PRETRANSLATE = os.getenv("COMPANION_PRETRANSLATE", "1") != "0"
 
-    prompt = f"""
-    You are a trusted, empathetic health worker speaking to a Nigerian patient.
-    Answer their question directly, simply, and calmly. If there are red-flag symptoms, advise them to see a doctor immediately.
-    Do not name prescription drugs or doses. For emergencies, tell them to go to the nearest hospital now.
 
-    {pending_context}
-
-    PAST CONTEXT (Their history):
-    {past_memories or 'No past history.'}
-
-    RECENT CONVERSATION:
-    {recent_chat or 'This is the first message.'}
-
-    CURRENT QUESTION (Translated to English for your understanding):
-    "{translated_text}"
-
-    ORIGINAL QUESTION (Use this ONLY to detect the language they are speaking):
-    "{user_text}"
-
-    INSTRUCTIONS:
-    1. Detect the language of the ORIGINAL QUESTION (Hausa, Nigerian Pidgin, or English).
-    2. Formulate your medical answer in THAT EXACT SAME DETECTED LANGUAGE.
-       - If the user spoke English, reply ONLY in English.
-       - If the user spoke Nigerian Pidgin, reply ONLY in Pidgin.
-       - If the user spoke Hausa, reply ONLY in Hausa.
-       - NEVER mix languages in your reply.
-    3. If there is an emergency (or pending emergency) and the patient has not given their location yet, your answer in that same language must conclude by asking them to speak what town or area they are in right now so you can find the nearest hospital.
-    4. If the user is speaking their location/town/city, return it in "spoken_location".
-
-    Return ONLY valid JSON in this exact format:
-    {{
-      "answer_english": "The medical answer in simple English (for our records).",
-      "answer_local": "Your medical answer in the DETECTED language (Hausa, Pidgin, or English).",
-      "detected_language": "Hausa" or "Pidgin" or "English",
-      "keywords": ["word1", "word2"],
-      "is_emergency": true or false,
-      "emergency_reason": "One short sentence why this is an emergency (or null)",
-      "spoken_location": "Extracted city/town/LGA if mentioned, otherwise null"
-    }}
-    """
+def get_companion(phone, create=True):
+    user = CompanionUser.query.filter_by(phone_number=phone).first()
+    if user or not create:
+        return user
     try:
-        res = llm_json(prompt, 0.2)
+        user = CompanionUser(phone_number=phone, preferred_language="ha")
+        db.session.add(user)
+        db.session.flush()
+    except IntegrityError:  # two requests registered the same number at once
+        db.session.rollback()
+        user = CompanionUser.query.filter_by(phone_number=phone).first()
+    return user
+
+
+def pending_passes(user):
+    """This user's unclaimed referral codes, newest first. Other users' codes can never appear here."""
+    return (Encounter.query
+            .filter(Encounter.companion_user_id == user.id,
+                    Encounter.referral_status == "pending",
+                    Encounter.referral_code.isnot(None))
+            .order_by(Encounter.created_at.desc()))
+
+
+def pass_payload(enc):
+    return {"code": enc.referral_code, "qr": enc.referral_qr,
+            "hospitals": enc.pass_hospitals or enc.referral_facility, "location": enc.pass_location}
+
+
+def revoke_companion_referral(user):
+    """Cancel the user's unclaimed referral. Returns 'revoked', 'claimed' (a hospital already took it) or 'none'.
+    The caller commits."""
+    pending = pending_passes(user).all()
+    if pending:
+        for enc in pending:
+            enc.referral_status = "revoked"
+            enc.status = "cancelled"
+            enc.updated_at = utcnow()
+        return "revoked"
+    last = (Encounter.query.filter(Encounter.companion_user_id == user.id, Encounter.referral_code.isnot(None))
+            .order_by(Encounter.created_at.desc()).first())
+    if last and last.referral_status == "fulfilled" and last.updated_at \
+            and (utcnow() - last.updated_at).total_seconds() < 12 * 3600:
+        return "claimed"
+    return "none"
+
+
+# ---- "Cancel my referral" in the patient's own words (Hausa, Pidgin or English) ----
+# Deterministic first, so cancelling is instant and works even when the AI service is slow or down.
+# The AI model also reports `revoke_referral` as a fallback for phrasings these words do not cover.
+_REVOKE_HA = ("soke", "sokar", "sokewa", "janye", "fasa", "goge", "cire", "kashe", "share")
+_REVOKE_EN = {"cancel", "cancelled", "canceled", "revoke", "revoked", "withdraw", "delete", "remove", "erase", "annul"}
+_REVOKE_PCM = {"comot", "scrap"}
+_NOUN_HA = ("lamba", "tikiti", "turawa", "tura", "izini", "takardar")
+_NOUN_EN = {"referral", "refer", "code", "pass", "ticket"}
+_NO_NEED = re.compile(
+    r"\b(?:ba ?(?:na|ni) (?:bukata|bukatar|so|son)|ban (?:bukata|bukatar|so|son)|bana (?:bukata|bukatar|so|son)|"
+    r"no need|(?:do not|dont|don t|no longer|not) (?:need|want)|i no (?:need|want))\b")
+# "don't cancel", "kar ka soke", "ba na so in soke": the person is saying the opposite
+_NEGATED_VERB = re.compile(
+    r"\b(?:do not|dont|don t|never|kar|karka|karki|kada|ba ?(?:na|ni) so in|bana so in|ban so in|ba na son)\b"
+    r"(?: \w+){0,2} (?:soke|sokar|sokewa|janye|fasa|goge|cire|kashe|share|cancel|revoke|withdraw|delete|remove|erase|comot)")
+_QUESTION_ONLY = re.compile(r"^(?:how|ta yaya|yaya)\b")
+
+REVOKE_MESSAGES = {
+    "ha": {
+        "revoked": "An soke lambar turawarka. Ba za a iya amfani da ita a asibiti ba yanzu. Idan ka sake bukatar taimako, kawai ka gaya mini.",
+        "claimed": "An riga an karbi lambar turawarka a asibiti, don haka ba za a iya soke ta ba.",
+        "none": "Ban ga wata lambar turawa da ke jiran amfani a wajenka ba.",
+    },
+    "pcm": {
+        "revoked": "I don cancel your referral code. Dem no fit use am for hospital again. If you need help later, just talk to me.",
+        "claimed": "Hospital don already take your referral code, so I no fit cancel am again.",
+        "none": "I no see any referral code wey dey wait for you.",
+    },
+    "en": {
+        "revoked": "Your referral code has been cancelled and can no longer be used at a hospital. If you need help again, just tell me.",
+        "claimed": "A hospital has already accepted your referral code, so it can't be cancelled any more.",
+        "none": "I don't see any unclaimed referral code for you.",
+    },
+}
+
+
+def detect_revoke_request(raw):
+    """(is_revoke, reply_language) for a transcript that asks to cancel a referral code."""
+    t = re.sub(r"[’'`]", " ", (raw or "").lower())
+    t = re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", t)).strip()
+    if not t or _QUESTION_ONLY.match(t):
+        return False, None
+    words = t.split()
+    wset = set(words)
+    noun_ha = any(w.startswith(_NOUN_HA) for w in words)
+    if not (noun_ha or wset & _NOUN_EN):
+        return False, None
+    verb_ha = any(w.startswith(_REVOKE_HA) for w in words)
+    verb_other = bool(wset & (_REVOKE_EN | _REVOKE_PCM))
+    if verb_ha or verb_other:
+        if _NEGATED_VERB.search(t):
+            return False, None
+        hit = True
+    else:
+        hit = bool(_NO_NEED.search(t))  # "I don't need the code any more"
+    if not hit:
+        return False, None
+    if verb_ha or noun_ha or re.search(r"\bba ?(?:na|ni)\b", t):
+        return True, "ha"
+    if wset & ({"comot", "scrap", "abeg", "dey", "wan", "wetin", "oga"}):
+        return True, "pcm"
+    return True, "en"
+
+
+def reply_lang_code(detected):
+    d = str(detected or "").lower()
+    return "ha" if "haus" in d else "pcm" if "pidgin" in d else "en"
+
+
+def save_exchange(user, user_text, translated, answer_local, answer_en, keywords=None):
+    db.session.add_all([
+        ChatMessage(user_id=user.id, role="user", original_text=user_text, translated_text=translated),
+        ChatMessage(user_id=user.id, role="ai", original_text=answer_local, translated_text=answer_en),
+    ])
+    kws = [str(k).strip() for k in (keywords or []) if str(k).strip()][:10]
+    if kws:
+        memory = MemoryIndex(user_id=user.id, context_chunk=f"User: {translated}\nAI: {answer_en}")
+        memory.keywords = [get_or_create_keyword(k) for k in kws]
+        db.session.add(memory)
+
+
+COMPANION_SYSTEM_PROMPT = """You are the SmartHealth Companion: a warm, calm, trustworthy community health worker talking with a person in Nigeria BY VOICE. Your reply is read aloud, so speak the way a kind nurse speaks to a neighbour.
+
+LANGUAGE
+- Detect the language of the ORIGINAL message (Hausa, Nigerian Pidgin or English) and reply ONLY in that language. Never mix languages.
+- Use simple, everyday spoken words. Hausa: plain spoken Hausa, not formal or bookish words. Pidgin: natural, never exaggerated.
+- The ORIGINAL comes from speech recognition. It can contain misheard, merged, split or misspelled words. Work out the most likely meaning from the whole sentence and the recent conversation. Never invent symptoms the person did not mention. If you truly cannot understand, say so kindly in their language and ask them to repeat. Do not guess about health.
+
+HOW TO ANSWER
+- Keep it short: 2 to 4 short sentences, about 60 words at most. No lists, numbering, headings, markdown, emojis or web links, because it will be spoken.
+- Answer the actual question first. Then add at most ONE helpful next step or ONE follow-up question.
+- Give general health information and practical self-care: rest, clean water, fluids and ORS for diarrhoea, handwashing, sleeping under a treated net, breastfeeding, when to go to a clinic.
+- Never name prescription drugs, antibiotics or doses. Never say you are certain what illness someone has. Never promise a cure. Never tell anyone to stop medicine a health worker gave them.
+- Take extra care with pregnancy, newborns, children under 5, older people, and long-term illness (HIV, diabetes, high blood pressure, sickle cell, TB). When unsure, send them to a clinic.
+- Fever in Nigeria can be malaria: say it should be tested at a clinic rather than guessed at. A baby or small child with fever should be seen the same day.
+- Never shame or lecture. Respect culture and religion.
+- If someone talks about harming themselves, be gentle, tell them they are not alone, ask them to stay with someone they trust, and to go to the nearest hospital or call 112 now. Treat it as an emergency.
+
+EMERGENCIES (is_emergency = true)
+Heavy bleeding; bleeding or water breaking in pregnancy; fits or convulsions; hard or noisy breathing; not waking or not responding; chest pain; sudden severe headache with stiff neck or confusion; face drooping, one-sided weakness or slurred speech; snake bite; bad burns; poisoning or swallowing chemicals; a baby who is floppy, will not feed or is very hot; severe dehydration (diarrhoea and vomiting with weakness); thoughts of suicide. Mild or ordinary symptoms are NOT emergencies.
+- In an emergency say plainly to go to the nearest hospital NOW. If the person has not said where they are, finish by asking them to say which town or area they are in so you can find the nearest hospital.
+- "spoken_location" is ONLY the place name (town, area or LGA) the person said. Otherwise null.
+
+REFERRAL CODE
+- Set "revoke_referral" to true ONLY when the person clearly asks you to cancel, withdraw or delete their referral or emergency code or pass (for example, the problem is solved or they no longer need it). Asking about it or mentioning it is not enough.
+
+OUTPUT: return ONLY one valid JSON object. No markdown fences, no extra text."""
+
+
+def answer_patient(user_text, translated_text, past_memories, recent_chat, pending_emergency=None, has_pass=False):
+    pending_active = bool(pending_emergency and pending_emergency.get("active"))
+    context = []
+    if pending_active:
+        context.append(
+            f'ACTIVE EMERGENCY: the person already reported an emergency ("{pending_emergency.get("reason")}") and we are '
+            "waiting for their town or area to prepare a hospital referral. If they now say where they are, put it in "
+            '"spoken_location". If not, answer calmly, remind them it is an emergency, and ask which town or area they are in.')
+    context.append("The person currently HAS an unclaimed referral code." if has_pass
+                   else "The person has no unclaimed referral code.")
+    context.append(f"PAST CONTEXT (their history):\n{past_memories or 'No past history.'}")
+    context.append(f"RECENT CONVERSATION:\n{recent_chat or 'This is the first message.'}")
+    context.append(f'ORIGINAL MESSAGE (speech-to-text; decides the reply language):\n"{user_text}"')
+    if translated_text:
+        context.append(f'ENGLISH TRANSLATION (authoritative meaning, already checked; rely on it):\n"{translated_text}"')
+
+    user_english_line = "" if translated_text else \
+        '"user_english": "The ORIGINAL message in clear natural English. Add nothing that was not said.",\n  '
+    schema = """Return exactly this JSON:
+{
+  {user_english_line}"answer_local": "Your spoken answer in the detected language.",
+  "answer_english": "ONE short English sentence summarising your advice, for the record.",
+  "detected_language": "Hausa" or "Pidgin" or "English",
+  "keywords": ["up to 6 lowercase words: the key symptom or condition words in English, plus the same words as the person said them"],
+  "is_emergency": true or false,
+  "emergency_reason": "One short sentence, or null",
+  "spoken_location": "Place name only, or null",
+  "revoke_referral": true or false
+}""".replace("{user_english_line}", user_english_line)
+    messages = [
+        {"role": "system", "content": COMPANION_SYSTEM_PROMPT},
+        {"role": "user", "content": "\n\n".join(context) + "\n\n" + schema},
+    ]
+    try:
+        res = parse_json_reply(llm_text(messages, 0.2, max_tokens=600))
     except Exception:
         logger.exception("Patient answer failed")
         res = {
+            "user_english": translated_text or user_text,
             "answer_english": "Please visit the nearest health clinic immediately.",
             "answer_local": "Please visit the nearest health clinic immediately.",
             "detected_language": "English",
             "keywords": [],
-            "is_emergency": bool(pending_emergency and pending_emergency.get("active")),
-            "emergency_reason": pending_emergency.get("reason") if pending_emergency else None,
-            "spoken_location": None
+            "is_emergency": pending_active,
+            "emergency_reason": pending_emergency.get("reason") if pending_active else None,
+            "spoken_location": None,
+            "revoke_referral": False,
         }
 
     # Deterministic keyword safety net
-    text_corpus = f"{user_text} {translated_text}"
+    text_corpus = f"{user_text} {translated_text or ''} {res.get('user_english') or ''}"
     if EMERGENCY_PATTERNS.search(text_corpus):
         res["is_emergency"] = True
         if not res.get("emergency_reason"):
@@ -1534,51 +1726,42 @@ def answer_patient(user_text, translated_text, past_memories, recent_chat, pendi
     return res
 
 
+def revoke_response(user_text, reply, lang, outcome):
+    return jsonify({
+        "user_text": user_text,
+        "ai_text_local": reply,
+        "audio_url": None,                       # fetched separately by /api/patient_tts so the text appears at once
+        "tts_lang": "ha" if lang == "ha" else "en",
+        "emergency_alert": {"is_emergency": False, "reason": None},
+        "auto_referral": None,
+        "referral_revoked": True,                # the page clears its ticket and any pending-emergency state
+        "revoke_outcome": outcome,
+    })
+
+
 @app.route("/api/patient_voice", methods=["POST"])
 def patient_voice():
+    t0 = time.time()
     phone = clean_phone(request.form.get("phone_number"))
     audio_file = request.files.get("audio")
     if not phone or not audio_file:
         return fail("Missing a valid phone number or audio.", 400)
 
     try:
-        # Auto-detect language here: companion users speak Hausa, Pidgin or English.
-        user_text = transcribe(audio_file, language="ha", STT_PROMPT_COMPANION)
+        user_text = transcribe(audio_file, language=COMPANION_STT_LANG if COMPANION_STT_LANG in ("en", "ha") else None,
+                               prompt=STT_PROMPT_COMPANION)
     except ValueError as e:
         return fail(str(e), 400)
     except Exception as e:
         if getattr(e, "status_code", None) == 429:
             return fail("Too many people are talking right now. Please try again in a minute.", 429, e)
         return fail("Could not understand the audio. Please speak clearly.", 400, e)
+    t1 = time.time()
 
     try:
-        patient = CompanionUser.query.filter_by(phone_number=phone).first()
-        if not patient:
-            patient = CompanionUser(phone_number=phone, preferred_language="ha")
-            db.session.add(patient)
-            db.session.flush()
+        patient = get_companion(phone)
 
-        # Gemini translates; the LiteLLM model is the fallback.
-        translated = gemini_translate(user_text, "English")
-        if not translated:
-            translated = llm_text([
-                {"role": "system", "content": "Translate to English. Return ONLY the translated text."},
-                {"role": "user", "content": user_text},
-            ], 0.3)
-
-        recent = (ChatMessage.query.filter_by(user_id=patient.id)
-                  .order_by(ChatMessage.created_at.desc()).limit(10).all())[::-1]
-        recent_text = "\n".join(f"{m.role}: {m.translated_text or m.original_text}" for m in recent)
-
-        long_term = ""
-        keywords = extract_search_keywords(translated)
-        if keywords:
-            memories = (MemoryIndex.query
-                        .filter(MemoryIndex.user_id == patient.id, MemoryIndex.keywords.any(Keyword.word.in_(keywords)))
-                        .order_by(MemoryIndex.created_at.desc()).limit(5).all())
-            long_term = "\n".join(f"Past Context: {m.context_chunk}" for m in memories)
-
-        # In-memory pending referral recovery
+        # In-memory pending referral recovery (sent by this phone's own page)
         raw_pending = request.form.get("pending_emergency")
         pending_emergency = None
         if raw_pending:
@@ -1586,87 +1769,141 @@ def patient_voice():
                 pending_emergency = json.loads(raw_pending)
             except Exception:
                 pending_emergency = None
+        pending_active = bool(pending_emergency and pending_emergency.get("active"))
 
-        ai = answer_patient(user_text, translated, long_term, recent_text, pending_emergency=pending_emergency)
-        answer_en = ai.get("answer_english", "")
-        answer_local = ai.get("answer_local") or answer_en
-        detected = str(ai.get("detected_language", "English")).lower()
+        # Fast path: "I want to cancel my referral" is handled instantly, with no AI call.
+        is_revoke, rlang = detect_revoke_request(user_text)
+        if is_revoke:
+            outcome = revoke_companion_referral(patient)
+            save_exchange(patient, user_text, user_text, REVOKE_MESSAGES[rlang][outcome], REVOKE_MESSAGES["en"][outcome])
+            db.session.commit()
+            logger.info("patient_voice revoke (%s): stt=%.1fs total=%.1fs", outcome, t1 - t0, time.time() - t0)
+            return revoke_response(user_text, REVOKE_MESSAGES[rlang][outcome], rlang, outcome)
 
-        db.session.add_all([
-            ChatMessage(user_id=patient.id, role="user", original_text=user_text, translated_text=translated),
-            ChatMessage(user_id=patient.id, role="ai", original_text=answer_local, translated_text=answer_en),
-        ])
-        kws = [str(k) for k in ai.get("keywords", []) if str(k).strip()][:10]
-        if kws:
-            memory = MemoryIndex(user_id=patient.id, context_chunk=f"User: {translated}\nAI: {answer_en}")
-            memory.keywords = [get_or_create_keyword(k) for k in kws]
-            db.session.add(memory)
+        # Gemini translates first (it is the one that handles Hausa well). Passing the language hint
+        # helps it; on failure it returns None and the LiteLLM model translates inside its own answer.
+        translated = None
+        if COMPANION_PRETRANSLATE:
+            translated = gemini_translate(user_text, "English",
+                                          COMPANION_STT_LANG if COMPANION_STT_LANG in ("en", "ha") else None)
+
+        recent = (ChatMessage.query.filter_by(user_id=patient.id)
+                  .order_by(ChatMessage.created_at.desc()).limit(8).all())[::-1]
+        recent_text = "\n".join(f"{m.role}: {m.translated_text or m.original_text}" for m in recent)
+
+        # Long-term memory: matches on this person's own words, plus their two latest memories.
+        memories = []
+        keywords = extract_search_keywords(translated or user_text)
+        mem_q = MemoryIndex.query.filter(MemoryIndex.user_id == patient.id)
+        if keywords:
+            memories = (mem_q.filter(MemoryIndex.keywords.any(Keyword.word.in_(keywords)))
+                        .order_by(MemoryIndex.created_at.desc()).limit(3).all())
+        seen = {m.id for m in memories}
+        memories += [m for m in mem_q.order_by(MemoryIndex.created_at.desc()).limit(2).all() if m.id not in seen]
+        long_term = "\n".join(f"Past Context: {m.context_chunk}" for m in memories)
+
+        has_pass = pending_passes(patient).first() is not None
+        t2 = time.time()
+        ai = answer_patient(user_text, translated, long_term, recent_text,
+                            pending_emergency=pending_emergency, has_pass=has_pass)
+        t3 = time.time()
+        translated = str(ai.get("user_english") or translated or user_text)
+        detected = str(ai.get("detected_language", "English"))
+        lang = reply_lang_code(detected)
+
+        # The model heard a cancel request that the word rules did not catch.
+        if ai.get("revoke_referral") is True and (has_pass or pending_active):
+            outcome = revoke_companion_referral(patient)
+            save_exchange(patient, user_text, translated, REVOKE_MESSAGES[lang][outcome], REVOKE_MESSAGES["en"][outcome])
+            db.session.commit()
+            logger.info("patient_voice revoke-by-model (%s): total=%.1fs", outcome, time.time() - t0)
+            return revoke_response(user_text, REVOKE_MESSAGES[lang][outcome], lang, outcome)
+
+        answer_en = str(ai.get("answer_english") or "")
+        answer_local = str(ai.get("answer_local") or answer_en)
+        save_exchange(patient, user_text, translated, answer_local, answer_en, ai.get("keywords"))
         db.session.commit()
 
-        # If user spoke their location, auto-generate the emergency open pass
-        spoken_loc = ai.get("spoken_location")
+        # An open emergency pass is created only for a real emergency, and only ONE unclaimed pass per person.
+        spoken_loc = str(ai.get("spoken_location") or "").strip()[:100]
         auto_referral = None
-
-        if spoken_loc:
+        if spoken_loc and (pending_active or ai.get("is_emergency")):
             try:
-                q = spoken_loc.strip()
-                matched_centers = MedicalCenter.query.filter(
-                    db.or_(MedicalCenter.name.ilike(f"%{q}%"), MedicalCenter.location.ilike(f"%{q}%"))
-                ).limit(5).all()
-                if not matched_centers:
-                    matched_centers = MedicalCenter.query.limit(3).all()
+                existing = pending_passes(patient).first()
+                if existing:
+                    auto_referral = pass_payload(existing)
+                else:
+                    matched_centers = MedicalCenter.query.filter(
+                        db.or_(MedicalCenter.name.ilike(f"%{spoken_loc}%"), MedicalCenter.location.ilike(f"%{spoken_loc}%"))
+                    ).limit(5).all()
+                    if not matched_centers:
+                        matched_centers = MedicalCenter.query.limit(3).all()
 
-                hosp_names = ", ".join([c.name + (f" ({c.location})" if c.location else "") for c in matched_centers])
-                first_center = matched_centers[0] if matched_centers else None
-                code = generate_referral_code(first_center.short_code if first_center else "EM")
-                qr_uri = make_qr_data_uri(code)
+                    hosp_names = ", ".join([c.name + (f" ({c.location})" if c.location else "") for c in matched_centers])
+                    first_center = matched_centers[0] if matched_centers else None
+                    code = generate_referral_code(first_center.short_code if first_center else "EM")
+                    qr_uri = make_qr_data_uri(code)
 
-                enc = Encounter(
-                    facility_id=first_center.id if first_center else 1,
-                    origin_facility_id=first_center.id if first_center else 1,
-                    destination_facility_id=None,
-                    patient_name="Emergency Voice Patient",
-                    dialect=detected,
-                    statement=f"Location: {spoken_loc} | Audio: {user_text}",
-                    translation=f"Location: {spoken_loc} | Audio: {translated}",
-                    triage_tier="RED",
-                    triage_notes=f"Emergency self-referral from {spoken_loc}.",
-                    referral_facility="Open Emergency Pass (Nearby Centers)",
-                    referral_code=code,
-                    referral_qr=qr_uri,
-                    referral_reason=f"Emergency near {spoken_loc}",
-                    referral_status="pending",
-                    current_stage="referral",
-                    status="active",
-                    created_at=utcnow(),
-                    updated_at=utcnow()
-                )
-                db.session.add(enc)
-                db.session.commit()
-
-                auto_referral = {
-                    "code": code,
-                    "qr": qr_uri,
-                    "location": spoken_loc,
-                    "hospitals": hosp_names
-                }
+                    enc = Encounter(
+                        facility_id=first_center.id if first_center else 1,
+                        origin_facility_id=first_center.id if first_center else 1,
+                        destination_facility_id=None,
+                        companion_user_id=patient.id,
+                        pass_hospitals=hosp_names,
+                        pass_location=spoken_loc,
+                        patient_name="Emergency Voice Patient",
+                        dialect=detected,
+                        statement=f"Location: {spoken_loc} | Audio: {user_text}",
+                        translation=f"Location: {spoken_loc} | Audio: {translated}",
+                        triage_tier="RED",
+                        triage_notes=f"Emergency self-referral from {spoken_loc}.",
+                        referral_facility="Open Emergency Pass (Nearby Centers)",
+                        referral_code=code,
+                        referral_qr=qr_uri,
+                        referral_reason=f"Emergency near {spoken_loc}",
+                        referral_status="pending",
+                        current_stage="referral",
+                        status="active",
+                        created_at=utcnow(),
+                        updated_at=utcnow()
+                    )
+                    db.session.add(enc)
+                    db.session.commit()
+                    auto_referral = pass_payload(enc)
             except Exception:
+                db.session.rollback()
                 logger.exception("Failed to auto-generate pass from spoken location")
 
     except Exception as e:
         db.session.rollback()
         return fail("Something went wrong. Please try again.", 500, e)
 
+    logger.info("patient_voice timing: stt=%.1fs db=%.1fs llm=%.1fs total=%.1fs", t1 - t0, t2 - t1, t3 - t2, time.time() - t0)
     return jsonify({
         "user_text": user_text,
         "ai_text_local": answer_local,
-        "audio_url": speak(answer_local, "ha" if "haus" in detected else "en"),
+        "audio_url": None,                       # fetched separately by /api/patient_tts so the text appears at once
+        "tts_lang": "ha" if lang == "ha" else "en",
         "emergency_alert": {
             "is_emergency": bool(ai.get("is_emergency")),
             "reason": ai.get("emergency_reason")
         },
-        "auto_referral": auto_referral
+        "auto_referral": auto_referral,
+        "referral_revoked": False,
     })
+
+
+@app.route("/api/patient_tts", methods=["POST"])
+def patient_tts():
+    """Voice for a reply the page already shows. Split from /api/patient_voice so text never waits for gTTS."""
+    data = request.get_json(silent=True) or {}
+    text = (data.get("text") or "").strip()[:700]
+    if not text:
+        return fail("No text provided.", 400)
+    audio = speak(text, "ha" if data.get("lang") == "ha" else "en")
+    if not audio:
+        return fail("Could not generate audio.", 502)
+    return jsonify({"audio_url": audio})
 
 
 @app.route("/api/patient_emergency_referral", methods=["POST"])
@@ -1694,6 +1931,8 @@ def patient_emergency_referral():
     stmt = f"Location: {location} | Symptoms: {reason}" if location else reason
 
     try:
+        companion = get_companion(phone)
+        revoke_companion_referral(companion)  # one unclaimed referral per person: a new one replaces the old
         code = generate_referral_code(short_code)
         qr_uri = make_qr_data_uri(code)
 
@@ -1701,6 +1940,9 @@ def patient_emergency_referral():
             facility_id=hospital.id if hospital else 1,
             origin_facility_id=hospital.id if hospital else 1,
             destination_facility_id=dest_id,
+            companion_user_id=companion.id,
+            pass_hospitals=facility_name,
+            pass_location=location or None,
             patient_name=name,
             dialect="Hausa/English",
             statement=stmt,
@@ -1735,6 +1977,32 @@ def patient_emergency_referral():
         return fail("Could not generate emergency referral. Please go directly to the hospital.", 500, e)
 
 
+@app.route("/api/patient/active_referral")
+def patient_active_referral():
+    """The page asks the SERVER which code (if any) belongs to this phone number, so it never trusts what
+    another number left behind in the same browser."""
+    phone = clean_phone(request.args.get("phone"))
+    user = get_companion(phone, create=False) if phone else None
+    enc = pending_passes(user).first() if user else None
+    return jsonify({"ticket": pass_payload(enc) if enc else None})
+
+
+@app.route("/api/patient/revoke_referral", methods=["POST"])
+def patient_revoke_referral():
+    """Same as saying 'cancel my referral' in the chat, for the Cancel button on the ticket."""
+    phone = clean_phone((request.get_json(silent=True) or {}).get("phone_number"))
+    if not phone:
+        return fail("Valid phone number required.", 400)
+    try:
+        user = get_companion(phone, create=False)
+        outcome = revoke_companion_referral(user) if user else "none"
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return fail("Could not cancel the referral. Please try again.", 500, e)
+    return jsonify({"status": outcome})
+
+
 @app.route("/api/patient/referral_status")
 def patient_referral_status():
     code = (request.args.get("code") or "").strip().upper()
@@ -1744,6 +2012,7 @@ def patient_referral_status():
     if not enc:
         return jsonify({"status": "not_found"})
     return jsonify({"status": enc.referral_status})
+
 
 # ==========================================
 # DUPLICATE DETECTION & MERGE ENGINE
