@@ -115,8 +115,8 @@
         <div class="bg-white rounded-xl border border-slate-200 p-4">
           <div class="flex items-center justify-between mb-1">
             <span class="font-bold text-ink text-sm">{{ enc.patient_name }}</span>
-            <span class="text-xs font-bold px-2 py-0.5 rounded-full {{ 'bg-brand-soft text-brand-dark' if enc.referral_status == 'fulfilled' else 'bg-warn-soft text-warn-dark' }}">
-              {{ enc.referral_status|upper }}
+            <span class="text-xs font-bold px-2 py-0.5 rounded-full {{ 'bg-brand-soft text-brand-dark' if enc.referral_status == 'fulfilled' else ('bg-slate-200 text-slate-500' if enc.referral_status == 'revoked' else 'bg-warn-soft text-warn-dark') }}">
+              {{ 'CANCELLED' if enc.referral_status == 'revoked' else (enc.referral_status or '')|upper }}
             </span>
           </div>
           <p class="text-xs text-slate-600">Referred to: <strong>{{ enc.referral_facility or 'Specialist Center' }}</strong></p>
