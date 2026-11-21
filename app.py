@@ -1535,7 +1535,7 @@ def patient_voice():
 
     try:
         # Auto-detect language here: companion users speak Hausa, Pidgin or English.
-        user_text = transcribe(audio_file, None, STT_PROMPT_COMPANION)
+        user_text = transcribe(audio_file, language="ha", STT_PROMPT_COMPANION)
     except ValueError as e:
         return fail(str(e), 400)
     except Exception as e:
