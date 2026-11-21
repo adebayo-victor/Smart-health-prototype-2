@@ -83,6 +83,10 @@
       <button id="closeModalBtn" class="w-full min-h-12 bg-slate-200 text-ink rounded-xl font-bold text-sm hover:bg-slate-300 transition">
         Close Ticket
       </button>
+      <button id="revokeBtn" class="w-full min-h-11 text-danger-dark rounded-xl font-bold text-xs hover:bg-danger-soft transition">
+        I don't need this code any more. Cancel it
+      </button>
+      <p class="text-[10px] text-slate-400">You can also say it: "Soke lambar turawa ta" or "cancel my referral".</p>
     </div>
   </div>
 </div>
@@ -95,22 +99,24 @@ const clips = [];
 let phone = null, busy = false, current = null;
 let activeTicket = null;
 
-// ---- In-Memory Pending Referral State ----
+// ---- Per-number state ----
+// Every key below includes the phone number, so one person's code or emergency never shows up in
+// another person's chat on the same device. (The old global keys are wiped once, below.)
+try { localStorage.removeItem('sh_active_ticket'); sessionStorage.removeItem('sh_pending_referral'); } catch (_) {}
+const ticketKey = () => `sh_active_ticket:${phone}`;
+const pendingKey = () => `sh_pending_referral:${phone}`;
+
 let pendingReferral = null;
-try {
-  const savedPending = sessionStorage.getItem('sh_pending_referral');
-  if (savedPending) pendingReferral = JSON.parse(savedPending);
-} catch (_) {}
 
 function setPendingReferral(reason) {
   pendingReferral = { active: true, reason: reason, timestamp: Date.now() };
-  try { sessionStorage.setItem('sh_pending_referral', JSON.stringify(pendingReferral)); } catch (_) {}
+  try { sessionStorage.setItem(pendingKey(), JSON.stringify(pendingReferral)); } catch (_) {}
   showPendingBanner(true, reason);
 }
 
 function clearPendingReferral() {
   pendingReferral = null;
-  try { sessionStorage.removeItem('sh_pending_referral'); } catch (_) {}
+  try { if (phone) sessionStorage.removeItem(pendingKey()); } catch (_) {}
   showPendingBanner(false);
 }
 
@@ -127,28 +133,41 @@ function showPendingBanner(show, reason = '') {
 }
 
 // ---- Storage & Floating Ticket ----
+function resetTicketUI() {
+  activeTicket = null;
+  $('floatingTicketPill').classList.add('hidden');
+  $('ticketModal').classList.add('hidden');
+}
+
 function loadActiveTicket() {
+  // 1) instant: this number's own cached copy (works offline). 2) the server decides what is really still valid.
+  resetTicketUI();
   try {
-    const raw = localStorage.getItem('sh_active_ticket');
-    if (raw) {
-      activeTicket = JSON.parse(raw);
-      renderFloatingPill();
-      pollTicketStatus();
-    }
+    const raw = localStorage.getItem(ticketKey());
+    if (raw) { activeTicket = JSON.parse(raw); renderFloatingPill(); }
   } catch (_) {}
+  syncTicketFromServer();
+}
+
+async function syncTicketFromServer() {
+  const forPhone = phone;
+  try {
+    const r = await SH.api(`/api/patient/active_referral?phone=${encodeURIComponent(forPhone)}`);
+    if (forPhone !== phone) return;           // the person switched number while this was loading
+    if (r.ticket) saveActiveTicket(r.ticket); else clearActiveTicket();
+  } catch (_) { /* offline: keep what this number had cached */ }
 }
 
 function saveActiveTicket(ticket) {
   activeTicket = ticket;
-  try { localStorage.setItem('sh_active_ticket', JSON.stringify(ticket)); } catch (_) {}
+  try { localStorage.setItem(ticketKey(), JSON.stringify(ticket)); } catch (_) {}
   renderFloatingPill();
-  pollTicketStatus();
 }
 
 function clearActiveTicket() {
   activeTicket = null;
-  try { localStorage.removeItem('sh_active_ticket'); } catch (_) {}
-  $('floatingTicketPill').classList.add('hidden');
+  try { if (phone) localStorage.removeItem(ticketKey()); } catch (_) {}
+  resetTicketUI();
 }
 
 function renderFloatingPill() {
@@ -158,12 +177,16 @@ function renderFloatingPill() {
 }
 
 async function pollTicketStatus() {
-  if (!activeTicket || !activeTicket.code) return;
+  if (!activeTicket || !activeTicket.code || document.hidden) return;
+  const code = activeTicket.code;
   try {
-    const res = await SH.api(`/api/patient/referral_status?code=${encodeURIComponent(activeTicket.code)}`);
+    const res = await SH.api(`/api/patient/referral_status?code=${encodeURIComponent(code)}`);
+    if (!activeTicket || activeTicket.code !== code) return;   // changed while waiting
     if (res.status === 'fulfilled') {
       clearActiveTicket();
       SH.toast('Your referral code was accepted at the hospital.', 'success');
+    } else if (res.status === 'revoked' || res.status === 'not_found') {
+      clearActiveTicket();
     }
   } catch (_) {}
 }
@@ -175,6 +198,9 @@ function enter(number) {
   try { sessionStorage.setItem('sh_phone', number); } catch (_) {}
   $('entryScreen').classList.add('hidden');
   $('chatScreen').classList.remove('hidden'); $('chatScreen').classList.add('flex');
+  // Start clean for THIS number, then load only what belongs to it.
+  pendingReferral = null; showPendingBanner(false);
+  try { const raw = sessionStorage.getItem(pendingKey()); if (raw) pendingReferral = JSON.parse(raw); } catch (_) {}
   loadActiveTicket();
   if (pendingReferral && pendingReferral.active) {
     showPendingBanner(true, pendingReferral.reason);
@@ -191,7 +217,7 @@ $('entryForm').addEventListener('submit', (e) => {
 });
 $('changeNumber').addEventListener('click', () => {
   try { sessionStorage.removeItem('sh_phone'); } catch (_) {}
-  location.reload();
+  location.reload();   // a full reload also empties the chat, the pill and every in-memory value
 });
 try { const saved = sessionStorage.getItem('sh_phone'); if (saved) enter(saved); } catch (_) {}
 
@@ -221,6 +247,7 @@ function ui(state) {
 async function press(e) {
   e && e.preventDefault && e.preventDefault();
   if (busy || recorder.active || !phone) return;
+  if (current) current.pause();
   try { mic.setPointerCapture && e && e.pointerId != null && mic.setPointerCapture(e.pointerId); } catch (_) {}
   ui('recording');
   try {
@@ -263,8 +290,15 @@ async function release(e) {
   try {
     const d = await SH.api('/api/patient_voice', { form });
     addMessage(d.user_text, 'user');
-    addMessage(d.ai_text_local, 'ai', d.audio_url);
+    const bubble = addMessage(d.ai_text_local, 'ai', d.audio_url);
     if (d.audio_url) play(d.audio_url);
+    else if (d.ai_text_local) fetchVoice(d.ai_text_local, d.tts_lang, bubble);   // text is already on screen
+
+    // 0. The person asked to cancel their referral: drop the ticket and any half-finished emergency.
+    if (d.referral_revoked) {
+      clearActiveTicket();
+      clearPendingReferral();
+    }
 
     // 1. If emergency detected without location, set pending in memory
     if (d.emergency_alert && d.emergency_alert.is_emergency && !d.auto_referral) {
@@ -314,14 +348,15 @@ document.addEventListener('visibilitychange', () => { if (document.hidden && rec
 window.addEventListener('pagehide', () => { if (recorder.active) recorder.cancel(); });
 
 // ---- Messages ----
+function replayButton(audioUrl) {
+  clips.push(audioUrl);
+  return `<button data-clip="${clips.length - 1}" class="replay mt-2 flex items-center gap-1.5 min-h-10 text-sm font-bold text-brand-dark hover:text-brand">
+      {{ icon('speaker', 'h-4 w-4') | replace('\n', '') }} Replay</button>`;
+}
+
 function addMessage(text, role, audioUrl) {
   const user = role === 'user';
-  let replay = '';
-  if (!user && audioUrl) {
-    clips.push(audioUrl);
-    replay = `<button data-clip="${clips.length - 1}" class="replay mt-2 flex items-center gap-1.5 min-h-10 text-sm font-bold text-brand-dark hover:text-brand">
-      {{ icon('speaker', 'h-4 w-4') | replace('\n', '') }} Replay</button>`;
-  }
+  const replay = (!user && audioUrl) ? replayButton(audioUrl) : '';
   $('chatMessages').insertAdjacentHTML('beforeend', `
     <div class="flex ${user ? 'justify-end' : 'justify-start'}">
       <div class="max-w-[85%] rounded-2xl p-4 shadow-sm ${user ? 'bg-ink text-white rounded-tr-none' : 'bg-brand-soft border border-brand/20 rounded-tl-none'}">
@@ -329,6 +364,17 @@ function addMessage(text, role, audioUrl) {
       </div>
     </div>`);
   $('chatMessages').scrollTop = $('chatMessages').scrollHeight;
+  return $('chatMessages').lastElementChild.firstElementChild;   // the bubble
+}
+
+// The reply text appears first; the voice is generated afterwards and attached when ready.
+async function fetchVoice(text, lang, bubble) {
+  try {
+    const r = await SH.api('/api/patient_tts', { json: { text, lang } });
+    if (!r.audio_url) return;
+    bubble.insertAdjacentHTML('beforeend', replayButton(r.audio_url));
+    if (!recorder.active && !busy) play(r.audio_url);   // do not talk over someone who is already speaking again
+  } catch (_) { /* the written answer is already there */ }
 }
 
 $('chatMessages').addEventListener('click', (e) => {
@@ -372,6 +418,18 @@ $('floatingTicketPill').addEventListener('click', () => {
 });
 $('closeModalBtn').addEventListener('click', () => {
   $('ticketModal').classList.add('hidden');
+});
+$('revokeBtn').addEventListener('click', async () => {
+  if (!activeTicket || !phone) return;
+  if (!confirm('Cancel this referral code? The hospital will no longer be able to use it.')) return;
+  try {
+    const r = await SH.api('/api/patient/revoke_referral', { json: { phone_number: phone } });
+    clearActiveTicket();
+    clearPendingReferral();
+    SH.toast(r.status === 'claimed' ? 'This code was already accepted at a hospital.' : 'Your referral code has been cancelled.', 'success');
+  } catch (err) {
+    SH.toast(err.message, 'error');
+  }
 });
 </script>
 {% endblock %}
