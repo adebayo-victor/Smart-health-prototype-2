@@ -2,9 +2,6 @@
 
 Flow of a patient encounter:
     translation -> triage -> diagnosis -> referral
-
-Pipeline for intake:
-    Whisper (Groq) transcribes  ->  Gemini API translates  ->  LiteLLM analyzes (TC/vitals/dialect)
 """
 import base64
 import hmac
@@ -34,13 +31,6 @@ from sqlalchemy import func
 from flask.sessions import SecureCookieSessionInterface
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
-
-# Gemini SDK (translation only). Optional import: if the package is missing the app still boots
-# and translation falls back to the raw transcript instead of crashing every page.
-try:
-    import google.generativeai as genai
-except ImportError:  # pragma: no cover
-    genai = None
 
 # ==========================================
 # 1. APP CONFIGURATION
@@ -111,10 +101,7 @@ class AutoSecureSession(SecureCookieSessionInterface):
 
 app.session_interface = AutoSecureSession()
 
-# gemini-2.0-flash has been shut down by Google, so the defaults below point at a current model.
-# Check https://ai.google.dev/gemini-api/docs/models and override with env vars if needed.
-LLM_MODEL = os.getenv("LLM_MODEL", "gemini/gemini-3.6-flash")   # LiteLLM analysis (stage 3)
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")    # direct Gemini SDK translation (stage 2)
+LLM_MODEL = os.getenv("LLM_MODEL", "gemini/gemini-1.5-flash")
 STAGES = ["translation", "triage", "diagnosis", "referral"]
 
 
@@ -284,32 +271,10 @@ with app.app_context():
 _groq = None
 _llm = None
 
-# ---- Gemini (direct SDK) for TRANSLATION ONLY ----
-_GEMINI_KEY = os.getenv("GEMINI_API_KEY")
-gemini_model = None
-_GEMINI_SAFETY = None
-if not _GEMINI_KEY:
-    logger.warning("GEMINI_API_KEY is NOT set. Translation will fall back to the raw transcript.")
-elif genai is None:
-    logger.warning("google-generativeai is not installed. Translation will fall back to the raw transcript.")
-else:
-    try:
-        genai.configure(api_key=_GEMINI_KEY)
-        gemini_model = genai.GenerativeModel(GEMINI_MODEL)
-        # Health talk (pregnancy, bleeding, injuries) can trip default filters and return nothing.
-        _GEMINI_SAFETY = {
-            genai.types.HarmCategory.HARM_CATEGORY_HARASSMENT: genai.types.HarmBlockThreshold.BLOCK_ONLY_HIGH,
-            genai.types.HarmCategory.HARM_CATEGORY_HATE_SPEECH: genai.types.HarmBlockThreshold.BLOCK_ONLY_HIGH,
-            genai.types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: genai.types.HarmBlockThreshold.BLOCK_ONLY_HIGH,
-            genai.types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: genai.types.HarmBlockThreshold.BLOCK_ONLY_HIGH,
-        }
-    except Exception:
-        logger.exception("Could not initialise Gemini model %s. Translation will use the raw transcript.", GEMINI_MODEL)
-        gemini_model = None
-
 # ---- Speech-to-text settings ----
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-large-v3")
 MIN_AUDIO_BYTES = 2000   # about 0.5 s; one-word answers such as a town name must still pass
+STT_PROMPT_CLINIC = "Medical consultation in Nigeria. Focus only on clear speech. Ignore background noise, coughing, or pauses. Terms: malaria, zazzabi, BP, temperature, headache, stomach."
 # Phrases Whisper tends to invent when it hears silence or noise.
 WHISPER_GHOSTS = {
     "thank you", "thanks", "thank you for watching", "thanks for watching", "you", "bye", "bye bye",
@@ -322,6 +287,7 @@ STT_LANGS = {"en": "en", "pcm": "en", "ha": "ha"}
 def get_groq():
     global _groq
     if _groq is None:
+        # timeout + retries: Groq occasionally returns 429/5xx or stalls on poor links
         _groq = Groq(api_key=os.getenv("GROQ_API_KEY"), timeout=45.0, max_retries=2)
     return _groq
 
@@ -355,52 +321,25 @@ def _seg(seg, key, default=None):
     return seg.get(key, default) if isinstance(seg, dict) else getattr(seg, key, default)
 
 
-def strict_translate(text, lang_hint=None):
-    """STAGE 2: Gemini translates the transcript to clean English. Literal, no clinical inference."""
-    if not text or not text.strip():
-        return ""
-    if gemini_model is None:
-        logger.error("strict_translate: Gemini is not available; returning raw text.")
-        return text
-
-    lang_line = ""
-    if lang_hint == "ha":
-        lang_line = "The source language is Hausa."
-    elif lang_hint == "en":
-        lang_line = "The source language is English or Nigerian Pidgin."
-
-    prompt = (
-        "You are a professional translator. The input below is a voice-to-text transcript that may be in "
-        "Hausa, Nigerian Pidgin, or English, and may contain phonetic misspellings, merged words, or broken "
-        "spacing. Do two things silently: (1) reconstruct the intended words from the phonetic garble, "
-        "(2) translate the FULL meaning into natural English. "
-        "HARD RULES: Output ONLY the English translation. No quotes, no markdown, no notes, no left-over "
-        "Hausa/Pidgin words. Do NOT add or invent any medical symptoms that are not present in the input. "
-        "If the input is already clear English, return it unchanged. "
-        f"{lang_line}\n\nInput: \"{text}\""
-    )
-    try:
-        response = gemini_model.generate_content(
-            prompt,
-            # Newer Gemini models "think" before answering and thinking tokens count against this limit,
-            # so keep it generous or the visible answer can come back empty.
-            generation_config=genai.types.GenerationConfig(temperature=0.1, max_output_tokens=2048),
-            safety_settings=_GEMINI_SAFETY,
-            request_options={"timeout": 25},
-        )
-        out = (response.text or "").strip().strip('"\'')
-        if not out:
-            logger.warning("Gemini returned an empty translation; using raw transcript.")
-            return text
-        logger.info(f"Gemini translation: '{text[:60]}' -> '{out[:60]}'")
-        return out
-    except Exception as e:
-        logger.error(f"Gemini translation failed ({e}); falling back to raw transcript.")
-        return text
+def _prompt_echo_detected(text, prompt):
+    """True if the transcription contains a suspicious multi-word slice of the prompt."""
+    if not text:
+        return False
+    # Normalize both sides
+    t_norm = re.sub(r"[^\w\s]", "", text.lower())
+    t_words = t_norm.split()
+    p_words = re.sub(r"[^\w\s]", "", prompt.lower()).split()
+    # Build all 4-word shingles from the prompt
+    shingles = {" ".join(p_words[i:i + 4]) for i in range(len(p_words) - 3)}
+    # If any 4-word window of the transcription matches a prompt shingle → echo
+    for i in range(len(t_words) - 3):
+        if " ".join(t_words[i:i + 4]) in shingles:
+            return True
+    return False
 
 
-def transcribe(audio_file, language=None):
-    """STAGE 1: Whisper (Groq) transcribes. No prompt sent to avoid echo bugs."""
+def transcribe(audio_file, language=None, prompt=STT_PROMPT_CLINIC):
+    """Whisper transcription — NO prompt sent to Groq to prevent echo bugs."""
     data = audio_file.read()
     if len(data) < MIN_AUDIO_BYTES:
         raise ValueError("Recording too short. Hold the button and speak clearly.")
@@ -425,6 +364,8 @@ def transcribe(audio_file, language=None):
         model=WHISPER_MODEL,
         response_format="verbose_json",
         temperature=0.0,
+        # NOTE: prompt intentionally NOT sent. Whisper echoes prompt fragments
+        # as "transcription" when audio is silent/noisy. Removing it fixes that.
     )
     if language in ("en", "ha"):
         kwargs["language"] = language
@@ -1015,7 +956,7 @@ def update_patient(patient_id):
 
 
 # ==========================================
-# 8. TRANSLATOR & TC ACTIONS  (3-STAGE PIPELINE)
+# 8. TRANSLATOR & TC ACTIONS
 # ==========================================
 @app.route("/api/translate", methods=["POST"])
 @login_required
@@ -1024,12 +965,10 @@ def translate_audio():
     if not audio_file:
         return fail("No audio file provided.", 400)
 
-    raw_lang = (request.form.get("language") or "").lower()
-    lang = STT_LANGS.get(raw_lang)
-
-    # STAGE 1: Whisper transcribes
+    # Optional hint from the "Patient speaks" selector. None means auto-detect.
+    lang = STT_LANGS.get((request.form.get("language") or "").lower())
     try:
-        raw_text = transcribe(audio_file, lang)
+        raw_text = transcribe(audio_file, lang, STT_PROMPT_CLINIC)
     except ValueError as e:
         return fail(str(e), 400)
     except Exception as e:
@@ -1037,69 +976,57 @@ def translate_audio():
             return fail("The speech service is busy. Wait a moment and try again.", 429, e)
         return fail("Could not transcribe the audio. Check connection and try again.", 502, e)
 
-    # STAGE 2: Gemini translates (literal, no clinical inference)
-    translation = strict_translate(raw_text, lang_hint=lang)
-
-    # STAGE 3: LiteLLM analyzes the CLEAN translated text -> TC box, vitals, dialect, conclusion
     prompt = f"""
-    You are a clinical data extraction assistant for a community health worker in Nigeria.
-    You are given a patient statement. The TRANSLATION is the authoritative English meaning.
-    The ORIGINAL is the raw speech-to-text (may contain phonetic errors) — use it only to detect the dialect.
-
-    ORIGINAL: "{raw_text}"
-    TRANSLATION: "{translation}"
-
+    You are a medical data extraction assistant. Analyze this patient statement recorded by a health worker in Nigeria.
+    The statement may be in Hausa, Nigerian Pidgin, or English. Speech recognition can mishear Hausa and Pidgin,
+    so if a word looks odd, infer the most likely medical meaning instead of copying it blindly.
+    STATEMENT: "{raw_text}"
     Return ONLY valid JSON (no markdown, no extra text):
     {{
-      "patient_name_mentioned": "Patient name if explicitly mentioned, otherwise null",
-      "dialect": "Detected language of the ORIGINAL: Hausa, Pidgin, or English",
+      "patient_name_mentioned": "Patient name if explicitly mentioned in statement, otherwise null",
+      "dialect": "Detected language: Hausa, Pidgin, or English",
+      "statement": "The original statement exactly as transcribed",
+      "translation": "The statement translated into clear English",
       "vitals": {{
         "temp": "temperature in Celsius or 'N/A'",
         "bp_sys": "systolic BP or 'N/A'",
         "bp_dia": "diastolic BP or 'N/A'",
-        "spo2": "oxygen saturation % or 'N/A'",
-        "hr": "heart rate or 'N/A'"
+        "spo2": "oxygen saturation % or 'N/A'"
       }},
-      "conclusion": "One-sentence clinical summary strictly based on the TRANSLATION",
+      "conclusion": "One-sentence clinical summary of the main complaint",
       "tc_actions": [
         {{
-          "claim": "Symptom extracted from the TRANSLATION",
-          "instruction": "Physical non-invasive instruction for the worker (e.g. Ask patient to point with one finger to where it hurts)",
+          "claim": "Symptom extracted (e.g. Severe Headache)",
+          "instruction": "Physical non-invasive instruction for the worker to give the patient (e.g. Ask patient to point with one finger to where it hurts)",
           "expected": "Expected physical response (e.g. Points to forehead or crown of head)"
         }}
       ]
     }}
-    Rules: Extract ONLY what is in the TRANSLATION. Do NOT invent symptoms. Provide 1 to 3 non-invasive
-    physical checks (pointing, showing fingers for days). No sensitive touching. No simple Yes/No questions.
+    Rules for tc_actions: Provide 1 to 3 non-invasive physical checks (pointing, showing fingers for days). No sensitive touching. No simple Yes/No questions.
     """
     try:
         data = llm_json(prompt, 0.2)
     except Exception as e:
-        logger.error(f"LiteLLM analysis failed: {e}")
-        data = {}
+        return fail("The AI returned unreadable data. Please try again.", 502, e)
 
-    # Merge: never let the model rewrite the transcript; keep exact heard text + Gemini translation
+    # Never let the model rewrite the transcript: the record must hold exactly what was heard.
     data["statement"] = raw_text
-    data["translation"] = translation or raw_text
 
     if not data.get("tc_actions"):
         data["tc_actions"] = [
             {
                 "claim": "Reported symptoms",
                 "instruction": "Ask the patient to point with their hand to where they feel discomfort.",
-                "expected": "Points to location of pain",
+                "expected": "Points to location of pain"
             }
         ]
-    if not data.get("dialect"):
-        data["dialect"] = "Hausa" if lang == "ha" else ("English" if lang == "en" else "Unknown")
 
     vitals = data.get("vitals") or {}
     stored = {
         "temp": to_float(vitals.get("temp")),
         "sys_bp": to_float(vitals.get("bp_sys")),
         "dia_bp": to_float(vitals.get("bp_dia")),
-        "spo2": to_float(vitals.get("spo2")),
-        "hr": to_float(vitals.get("hr")),
+        "spo2": to_float(vitals.get("spo2"))
     }
     data["vitals"] = {k: v for k, v in stored.items() if v is not None}
     return jsonify(data)
@@ -1474,7 +1401,9 @@ def answer_patient(user_text, translated_text, past_memories, recent_chat, pendi
             "spoken_location": None
         }
 
-    if EMERGENCY_PATTERNS.search(f"{user_text} {translated_text}"):
+    # Deterministic keyword safety net
+    text_corpus = f"{user_text} {translated_text}"
+    if EMERGENCY_PATTERNS.search(text_corpus):
         res["is_emergency"] = True
         if not res.get("emergency_reason"):
             res["emergency_reason"] = "Urgent clinical danger signs detected in speech."
@@ -1490,7 +1419,8 @@ def patient_voice():
         return fail("Missing a valid phone number or audio.", 400)
 
     try:
-        user_text = transcribe(audio_file, None)
+        # Auto-detect language here: companion users speak Hausa, Pidgin or English.
+        user_text = transcribe(audio_file, None, STT_PROMPT_COMPANION)
     except ValueError as e:
         return fail(str(e), 400)
     except Exception as e:
@@ -1505,8 +1435,10 @@ def patient_voice():
             db.session.add(patient)
             db.session.flush()
 
-        # STAGE 2: Translate using Gemini
-        translated = strict_translate(user_text)
+        translated = llm_text([
+            {"role": "system", "content": "Translate to English. Return ONLY the translated text."},
+            {"role": "user", "content": user_text},
+        ], 0.3)
 
         recent = (ChatMessage.query.filter_by(user_id=patient.id)
                   .order_by(ChatMessage.created_at.desc()).limit(10).all())[::-1]
@@ -1520,6 +1452,7 @@ def patient_voice():
                         .order_by(MemoryIndex.created_at.desc()).limit(5).all())
             long_term = "\n".join(f"Past Context: {m.context_chunk}" for m in memories)
 
+        # In-memory pending referral recovery
         raw_pending = request.form.get("pending_emergency")
         pending_emergency = None
         if raw_pending:
@@ -1544,6 +1477,7 @@ def patient_voice():
             db.session.add(memory)
         db.session.commit()
 
+        # If user spoke their location, auto-generate the emergency open pass
         spoken_loc = ai.get("spoken_location")
         auto_referral = None
 
@@ -1611,6 +1545,7 @@ def patient_voice():
 
 @app.route("/api/patient_emergency_referral", methods=["POST"])
 def patient_emergency_referral():
+    """Unified handler: direct hospital referral and open emergency passes."""
     data = request.get_json(silent=True) or {}
     phone = clean_phone(data.get("phone_number"))
     name = (data.get("full_name") or "").strip()[:100] or "Emergency Patient"
@@ -1691,6 +1626,7 @@ def patient_referral_status():
 @app.route("/api/patients/check-duplicates", methods=["POST"])
 @login_required
 def check_patient_duplicates():
+    """Checks for likely existing matches in the same facility before saving a new patient."""
     data = request.get_json(silent=True) or {}
     facility_id = session["facility_id"]
     name = (data.get("full_name") or "").strip()
@@ -1702,6 +1638,7 @@ def check_patient_duplicates():
     matches = []
     seen_ids = set()
 
+    # 1. Exact match on Facility Hospital ID
     if hospital_id:
         p_hid = Patient.query.filter(
             Patient.facility_id == facility_id,
@@ -1712,6 +1649,7 @@ def check_patient_duplicates():
             matches.append({**p_hid.to_dict(), "match_reason": f"Exact Hospital ID match: {hospital_id}"})
             seen_ids.add(p_hid.id)
 
+    # 2. Match on identical phone number
     if phone:
         p_phones = Patient.query.filter(
             Patient.facility_id == facility_id,
@@ -1723,6 +1661,7 @@ def check_patient_duplicates():
             matches.append({**p.to_dict(), "match_reason": f"Same phone number: {phone}"})
             seen_ids.add(p.id)
 
+    # 3. Fuzzy name match (sorted tokens + close age or sex)
     if name:
         tokens = normalize_name(name).split()
         if tokens:
@@ -1735,6 +1674,7 @@ def check_patient_duplicates():
             for c in candidates:
                 c_tokens = set((c.name_key or "").split())
                 overlap = len(set(tokens) & c_tokens)
+                # If at least 2 tokens match or name is single word and identical
                 if (overlap >= 2) or (len(tokens) == 1 and tokens[0] in c_tokens):
                     is_close_age = age is not None and c.age_years is not None and abs(c.age_years - age) <= 3
                     is_same_sex = sex and c.sex and sex == c.sex
@@ -1749,6 +1689,7 @@ def check_patient_duplicates():
 @app.route("/api/patients/merge", methods=["POST"])
 @login_required
 def merge_patients():
+    """Combines secondary patient into primary. Reassigns encounters and soft-deletes secondary."""
     data = request.get_json(silent=True) or {}
     primary_id = data.get("primary_id")
     secondary_id = data.get("secondary_id")
@@ -1768,11 +1709,13 @@ def merge_patients():
         return fail("Secondary patient not found or already merged.", 404)
 
     try:
+        # Reassign all encounters to primary
         Encounter.query.filter_by(patient_id=secondary.id).update({
             "patient_id": primary.id,
             "patient_name": primary.full_name
         })
 
+        # Copy any missing demographic info from secondary to primary
         if not primary.phone and secondary.phone: primary.phone = secondary.phone
         if not primary.hospital_id and secondary.hospital_id: primary.hospital_id = secondary.hospital_id
         if not primary.age_years and secondary.age_years: primary.age_years = secondary.age_years
@@ -1780,6 +1723,7 @@ def merge_patients():
         if not primary.village_lga and secondary.village_lga: primary.village_lga = secondary.village_lga
         if not primary.allergies and secondary.allergies: primary.allergies = secondary.allergies
 
+        # Soft-delete secondary record and point to primary
         secondary.is_active = False
         secondary.merged_into_id = primary.id
 
@@ -1797,6 +1741,7 @@ def merge_patients():
 @app.route("/api/patients/undo-merge/<int:secondary_id>", methods=["POST"])
 @login_required
 def undo_merge(secondary_id):
+    """Reverses an accidental merge."""
     facility_id = session["facility_id"]
     secondary = db.session.get(Patient, secondary_id)
 
