@@ -23,7 +23,6 @@ from datetime import datetime, timezone
 from functools import wraps
 
 import qrcode
-import google.generativeai as genai  # <-- Gemini SDK for translation
 from dotenv import load_dotenv
 from flask import (Flask, jsonify, redirect, render_template, request,
                    send_from_directory, session, url_for)
@@ -35,6 +34,13 @@ from sqlalchemy import func
 from flask.sessions import SecureCookieSessionInterface
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
+
+# Gemini SDK (translation only). Optional import: if the package is missing the app still boots
+# and translation falls back to the raw transcript instead of crashing every page.
+try:
+    import google.generativeai as genai
+except ImportError:  # pragma: no cover
+    genai = None
 
 # ==========================================
 # 1. APP CONFIGURATION
@@ -105,7 +111,10 @@ class AutoSecureSession(SecureCookieSessionInterface):
 
 app.session_interface = AutoSecureSession()
 
-LLM_MODEL = os.getenv("LLM_MODEL", "gemini/gemini-2.0-flash") # Updated default
+# gemini-2.0-flash has been shut down by Google, so the defaults below point at a current model.
+# Check https://ai.google.dev/gemini-api/docs/models and override with env vars if needed.
+LLM_MODEL = os.getenv("LLM_MODEL", "gemini/gemini-3.6-flash")   # LiteLLM analysis (stage 3)
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")    # direct Gemini SDK translation (stage 2)
 STAGES = ["translation", "triage", "diagnosis", "referral"]
 
 
@@ -277,12 +286,26 @@ _llm = None
 
 # ---- Gemini (direct SDK) for TRANSLATION ONLY ----
 _GEMINI_KEY = os.getenv("GEMINI_API_KEY")
+gemini_model = None
+_GEMINI_SAFETY = None
 if not _GEMINI_KEY:
-    logger.warning("⚠️ GEMINI_API_KEY is NOT set. Translation will fall back to the raw transcript.")
+    logger.warning("GEMINI_API_KEY is NOT set. Translation will fall back to the raw transcript.")
+elif genai is None:
+    logger.warning("google-generativeai is not installed. Translation will fall back to the raw transcript.")
 else:
-    genai.configure(api_key=_GEMINI_KEY)
-    # UPDATED: Using gemini-2.0-flash (or change to "gemini-3.1" if that is your exact provider string)
-    gemini_model = genai.GenerativeModel("gemini-3.1-flash")
+    try:
+        genai.configure(api_key=_GEMINI_KEY)
+        gemini_model = genai.GenerativeModel(GEMINI_MODEL)
+        # Health talk (pregnancy, bleeding, injuries) can trip default filters and return nothing.
+        _GEMINI_SAFETY = {
+            genai.types.HarmCategory.HARM_CATEGORY_HARASSMENT: genai.types.HarmBlockThreshold.BLOCK_ONLY_HIGH,
+            genai.types.HarmCategory.HARM_CATEGORY_HATE_SPEECH: genai.types.HarmBlockThreshold.BLOCK_ONLY_HIGH,
+            genai.types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: genai.types.HarmBlockThreshold.BLOCK_ONLY_HIGH,
+            genai.types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: genai.types.HarmBlockThreshold.BLOCK_ONLY_HIGH,
+        }
+    except Exception:
+        logger.exception("Could not initialise Gemini model %s. Translation will use the raw transcript.", GEMINI_MODEL)
+        gemini_model = None
 
 # ---- Speech-to-text settings ----
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-large-v3")
@@ -336,8 +359,8 @@ def strict_translate(text, lang_hint=None):
     """STAGE 2: Gemini translates the transcript to clean English. Literal, no clinical inference."""
     if not text or not text.strip():
         return ""
-    if not _GEMINI_KEY:
-        logger.error("strict_translate called without GEMINI_API_KEY; returning raw text.")
+    if gemini_model is None:
+        logger.error("strict_translate: Gemini is not available; returning raw text.")
         return text
 
     lang_line = ""
@@ -359,13 +382,20 @@ def strict_translate(text, lang_hint=None):
     try:
         response = gemini_model.generate_content(
             prompt,
-            generation_config=genai.types.GenerationConfig(temperature=0.1, max_output_tokens=400),
+            # Newer Gemini models "think" before answering and thinking tokens count against this limit,
+            # so keep it generous or the visible answer can come back empty.
+            generation_config=genai.types.GenerationConfig(temperature=0.1, max_output_tokens=2048),
+            safety_settings=_GEMINI_SAFETY,
+            request_options={"timeout": 25},
         )
         out = (response.text or "").strip().strip('"\'')
-        logger.info(f"🈯 Gemini translation: '{text[:60]}' -> '{out[:60]}'")
-        return out or text
+        if not out:
+            logger.warning("Gemini returned an empty translation; using raw transcript.")
+            return text
+        logger.info(f"Gemini translation: '{text[:60]}' -> '{out[:60]}'")
+        return out
     except Exception as e:
-        logger.error(f"❌ Gemini translation failed ({e}); falling back to raw transcript.")
+        logger.error(f"Gemini translation failed ({e}); falling back to raw transcript.")
         return text
 
 
