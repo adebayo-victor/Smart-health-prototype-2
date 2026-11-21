@@ -373,23 +373,23 @@ def gemini_translate(text, target="English", lang_hint=None):
             lang_line = "The source language is Hausa."
         elif lang_hint == "en":
             lang_line = "The source language is English or Nigerian Pidgin."
-        prompt = (
-            "You are a forensic sociolinguist and low-resource language reconstruction specialist fluent in "
-            "Hausa, Nigerian Pidgin, and English. The input below is a noisy voice-to-text transcript that may "
-            "contain phonetic misspellings, missing diacritics, merged or split words, broken spacing, and "
-            "jumbled word order. Silently execute this reconstruction pipeline before answering: "
-            "(1) break the transcript into individual words and phonetic fragments, "
-            "(2) map each token to its likely intended word and candidate meaning, "
-            "(3) test adjacent words and neighboring clauses side by side—merging split syllables, separating "
-            "run-together words, and reordering scrambled segments until a coherent meaning emerges, "
-            "(4) check against literal nonsense to catch idioms or colloquial expressions, and "
-            "(5) synthesize the FULL intended meaning into clear, natural English. "
-            "HARD RULES: Output ONLY the final English translation. No quotes, no markdown, no notes, no "
-            "step-by-step output, and no left-over Hausa or Pidgin words. Do NOT add, guess, or invent any "
-            "medical symptoms or details that are not supported by the input. "
-            "If the input is already clear English, return it unchanged. "
-            f"{lang_line}\n\nInput: \"{text}\""
-        )
+            prompt = (
+                "You are a forensic sociolinguist and low-resource language reconstruction specialist fluent in "
+                "Hausa, Nigerian Pidgin, and English. The input below is a noisy voice-to-text transcript that may "
+                "contain phonetic misspellings, missing diacritics, merged or split words, broken spacing, and "
+                "jumbled word order. Silently execute this reconstruction pipeline before answering: "
+                "(1) break the transcript into individual words and phonetic fragments, "
+                "(2) map each token to its likely intended word and candidate meaning, "
+                "(3) test adjacent words and neighboring clauses side by side—merging split syllables, separating "
+                "run-together words, and reordering scrambled segments until a coherent meaning emerges, "
+                "(4) check against literal nonsense to catch idioms or colloquial expressions, and "
+                "(5) synthesize the FULL intended meaning into clear, natural English. "
+                "HARD RULES: Output ONLY the final English translation. No quotes, no markdown, no notes, no "
+                "step-by-step output, and no left-over Hausa or Pidgin words. Do NOT add, guess, or invent any "
+                "medical symptoms or details that are not supported by the input. "
+                "If the input is already clear English, return it unchanged. "
+                f"{lang_line}\n\nInput: \"{text}\""
+            )
 
     else:
         prompt = (
