@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from functools import wraps
 
 import qrcode
+import google.generativeai as genai  # <-- ADDED FOR GEMINI TRANSLATION
 from dotenv import load_dotenv
 from flask import (Flask, jsonify, redirect, render_template, request,
                    send_from_directory, session, url_for)
@@ -270,6 +271,38 @@ with app.app_context():
 # ==========================================
 _groq = None
 _llm = None
+
+# Configure Gemini API for strict translation
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+gemini_model = genai.GenerativeModel("gemini-1.5-flash")
+
+def strict_translate(text):
+    """Translates text using Gemini API with strict rules to prevent hallucination."""
+    if not text or not text.strip():
+        return ""
+    
+    prompt = (
+        "Translate the following text to English.\n"
+        "STRICT RULES:\n"
+        "1. Translate LITERALLY. Do NOT add, infer, or invent any medical symptoms (like vomiting, fever, or pain) unless the words are explicitly in the text.\n"
+        "2. If the text contains spelling errors or merged words (e.g., 'Abubu wa'), fix the spacing based on phonetic similarity, but do not change the core meaning.\n"
+        "3. Return ONLY the translated English text. No quotes, no markdown, no explanations.\n\n"
+        f"Text to translate: \"{text}\""
+    )
+    
+    try:
+        response = gemini_model.generate_content(
+            prompt,
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.1,
+                max_output_tokens=300
+            )
+        )
+        return response.text.strip().strip('"\'')
+    except Exception as e:
+        logger.error(f"Gemini translation failed: {e}")
+        return text  # Safe fallback to original text if API fails
+
 
 # ---- Speech-to-text settings ----
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-large-v3")
@@ -965,10 +998,12 @@ def translate_audio():
     if not audio_file:
         return fail("No audio file provided.", 400)
 
-    # Optional hint from the "Patient speaks" selector. None means auto-detect.
-    lang = STT_LANGS.get((request.form.get("language") or "").lower())
+    # Force language to prevent Whisper auto-detect roulette
+    raw_lang = (request.form.get("language") or "").lower()
+    lang = STT_LANGS.get(raw_lang) or "en"
+
     try:
-        raw_text = transcribe(audio_file, lang, STT_PROMPT_CLINIC)
+        raw_text = transcribe(audio_file, lang)
     except ValueError as e:
         return fail(str(e), 400)
     except Exception as e:
@@ -976,60 +1011,27 @@ def translate_audio():
             return fail("The speech service is busy. Wait a moment and try again.", 429, e)
         return fail("Could not transcribe the audio. Check connection and try again.", 502, e)
 
-    prompt = f"""
-    You are a medical data extraction assistant. Analyze this patient statement recorded by a health worker in Nigeria.
-    The statement may be in Hausa, Nigerian Pidgin, or English. Speech recognition can mishear Hausa and Pidgin,
-    so if a word looks odd, infer the most likely medical meaning instead of copying it blindly.
-    STATEMENT: "{raw_text}"
-    Return ONLY valid JSON (no markdown, no extra text):
-    {{
-      "patient_name_mentioned": "Patient name if explicitly mentioned in statement, otherwise null",
-      "dialect": "Detected language: Hausa, Pidgin, or English",
-      "statement": "The original statement exactly as transcribed",
-      "translation": "The statement translated into clear English",
-      "vitals": {{
-        "temp": "temperature in Celsius or 'N/A'",
-        "bp_sys": "systolic BP or 'N/A'",
-        "bp_dia": "diastolic BP or 'N/A'",
-        "spo2": "oxygen saturation % or 'N/A'"
-      }},
-      "conclusion": "One-sentence clinical summary of the main complaint",
-      "tc_actions": [
-        {{
-          "claim": "Symptom extracted (e.g. Severe Headache)",
-          "instruction": "Physical non-invasive instruction for the worker to give the patient (e.g. Ask patient to point with one finger to where it hurts)",
-          "expected": "Expected physical response (e.g. Points to forehead or crown of head)"
-        }}
-      ]
-    }}
-    Rules for tc_actions: Provide 1 to 3 non-invasive physical checks (pointing, showing fingers for days). No sensitive touching. No simple Yes/No questions.
-    """
-    try:
-        data = llm_json(prompt, 0.2)
-    except Exception as e:
-        return fail("The AI returned unreadable data. Please try again.", 502, e)
+    # --- STRICT GEMINI TRANSLATION ONLY ---
+    # This will fix merged words but will NOT invent "vomiting" if it's not there.
+    translation = strict_translate(raw_text)
+    
+    detected_dialect = "Hausa" if lang == "ha" else ("Pidgin" if raw_lang == "pcm" else "English")
 
-    # Never let the model rewrite the transcript: the record must hold exactly what was heard.
-    data["statement"] = raw_text
-
-    if not data.get("tc_actions"):
-        data["tc_actions"] = [
+    return jsonify({
+        "patient_name_mentioned": None, 
+        "dialect": detected_dialect,
+        "statement": raw_text,
+        "translation": translation,
+        "vitals": {},  
+        "conclusion": translation, 
+        "tc_actions": [
             {
                 "claim": "Reported symptoms",
                 "instruction": "Ask the patient to point with their hand to where they feel discomfort.",
                 "expected": "Points to location of pain"
             }
         ]
-
-    vitals = data.get("vitals") or {}
-    stored = {
-        "temp": to_float(vitals.get("temp")),
-        "sys_bp": to_float(vitals.get("bp_sys")),
-        "dia_bp": to_float(vitals.get("bp_dia")),
-        "spo2": to_float(vitals.get("spo2"))
-    }
-    data["vitals"] = {k: v for k, v in stored.items() if v is not None}
-    return jsonify(data)
+    })
 
 
 @app.route("/api/intake/save", methods=["POST"])
@@ -1420,7 +1422,7 @@ def patient_voice():
 
     try:
         # Auto-detect language here: companion users speak Hausa, Pidgin or English.
-        user_text = transcribe(audio_file, None, STT_PROMPT_COMPANION)
+        user_text = transcribe(audio_file, None, STT_PROMPT_CLINIC)
     except ValueError as e:
         return fail(str(e), 400)
     except Exception as e:
