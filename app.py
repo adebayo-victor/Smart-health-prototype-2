@@ -282,7 +282,7 @@ if not _GEMINI_KEY:
 else:
     genai.configure(api_key=_GEMINI_KEY)
     # UPDATED: Using gemini-2.0-flash (or change to "gemini-3.1" if that is your exact provider string)
-    gemini_model = genai.GenerativeModel("gemini-2.0-flash")
+    gemini_model = genai.GenerativeModel("gemini-3.1-flash")
 
 # ---- Speech-to-text settings ----
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-large-v3")
