@@ -105,7 +105,7 @@ class AutoSecureSession(SecureCookieSessionInterface):
 
 app.session_interface = AutoSecureSession()
 
-LLM_MODEL = os.getenv("LLM_MODEL", "gemini/gemini-1.5-flash")
+LLM_MODEL = os.getenv("LLM_MODEL", "gemini/gemini-2.0-flash") # Updated default
 STAGES = ["translation", "triage", "diagnosis", "referral"]
 
 
@@ -276,13 +276,13 @@ _groq = None
 _llm = None
 
 # ---- Gemini (direct SDK) for TRANSLATION ONLY ----
-# A loud startup check so a missing key is never silent again.
 _GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 if not _GEMINI_KEY:
-    logger.warning("⚠️ GEMINI_API_KEY is NOT set. Translation will fall back to the raw transcript (echo bug).")
+    logger.warning("⚠️ GEMINI_API_KEY is NOT set. Translation will fall back to the raw transcript.")
 else:
     genai.configure(api_key=_GEMINI_KEY)
-    gemini_model = genai.GenerativeModel("gemini-1.5-flash")
+    # UPDATED: Using gemini-2.0-flash (or change to "gemini-3.1" if that is your exact provider string)
+    gemini_model = genai.GenerativeModel("gemini-2.0-flash")
 
 # ---- Speech-to-text settings ----
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-large-v3")
@@ -299,7 +299,6 @@ STT_LANGS = {"en": "en", "pcm": "en", "ha": "ha"}
 def get_groq():
     global _groq
     if _groq is None:
-        # timeout + retries: Groq occasionally returns 429/5xx or stalls on poor links
         _groq = Groq(api_key=os.getenv("GROQ_API_KEY"), timeout=45.0, max_retries=2)
     return _groq
 
@@ -346,7 +345,6 @@ def strict_translate(text, lang_hint=None):
         lang_line = "The source language is Hausa."
     elif lang_hint == "en":
         lang_line = "The source language is English or Nigerian Pidgin."
-    # else: let Gemini auto-detect
 
     prompt = (
         "You are a professional translator. The input below is a voice-to-text transcript that may be in "
@@ -997,7 +995,7 @@ def translate_audio():
         return fail("No audio file provided.", 400)
 
     raw_lang = (request.form.get("language") or "").lower()
-    lang = STT_LANGS.get(raw_lang)  # None if auto-detect
+    lang = STT_LANGS.get(raw_lang)
 
     # STAGE 1: Whisper transcribes
     try:
@@ -1446,9 +1444,7 @@ def answer_patient(user_text, translated_text, past_memories, recent_chat, pendi
             "spoken_location": None
         }
 
-    # Deterministic keyword safety net
-    text_corpus = f"{user_text} {translated_text}"
-    if EMERGENCY_PATTERNS.search(text_corpus):
+    if EMERGENCY_PATTERNS.search(f"{user_text} {translated_text}"):
         res["is_emergency"] = True
         if not res.get("emergency_reason"):
             res["emergency_reason"] = "Urgent clinical danger signs detected in speech."
@@ -1464,7 +1460,6 @@ def patient_voice():
         return fail("Missing a valid phone number or audio.", 400)
 
     try:
-        # Auto-detect language here: companion users speak Hausa, Pidgin or English.
         user_text = transcribe(audio_file, None)
     except ValueError as e:
         return fail(str(e), 400)
@@ -1480,6 +1475,7 @@ def patient_voice():
             db.session.add(patient)
             db.session.flush()
 
+        # STAGE 2: Translate using Gemini
         translated = strict_translate(user_text)
 
         recent = (ChatMessage.query.filter_by(user_id=patient.id)
@@ -1494,7 +1490,6 @@ def patient_voice():
                         .order_by(MemoryIndex.created_at.desc()).limit(5).all())
             long_term = "\n".join(f"Past Context: {m.context_chunk}" for m in memories)
 
-        # In-memory pending referral recovery
         raw_pending = request.form.get("pending_emergency")
         pending_emergency = None
         if raw_pending:
@@ -1519,7 +1514,6 @@ def patient_voice():
             db.session.add(memory)
         db.session.commit()
 
-        # If user spoke their location, auto-generate the emergency open pass
         spoken_loc = ai.get("spoken_location")
         auto_referral = None
 
@@ -1587,7 +1581,6 @@ def patient_voice():
 
 @app.route("/api/patient_emergency_referral", methods=["POST"])
 def patient_emergency_referral():
-    """Unified handler: direct hospital referral and open emergency passes."""
     data = request.get_json(silent=True) or {}
     phone = clean_phone(data.get("phone_number"))
     name = (data.get("full_name") or "").strip()[:100] or "Emergency Patient"
@@ -1668,7 +1661,6 @@ def patient_referral_status():
 @app.route("/api/patients/check-duplicates", methods=["POST"])
 @login_required
 def check_patient_duplicates():
-    """Checks for likely existing matches in the same facility before saving a new patient."""
     data = request.get_json(silent=True) or {}
     facility_id = session["facility_id"]
     name = (data.get("full_name") or "").strip()
@@ -1680,7 +1672,6 @@ def check_patient_duplicates():
     matches = []
     seen_ids = set()
 
-    # 1. Exact match on Facility Hospital ID
     if hospital_id:
         p_hid = Patient.query.filter(
             Patient.facility_id == facility_id,
@@ -1691,7 +1682,6 @@ def check_patient_duplicates():
             matches.append({**p_hid.to_dict(), "match_reason": f"Exact Hospital ID match: {hospital_id}"})
             seen_ids.add(p_hid.id)
 
-    # 2. Match on identical phone number
     if phone:
         p_phones = Patient.query.filter(
             Patient.facility_id == facility_id,
@@ -1703,7 +1693,6 @@ def check_patient_duplicates():
             matches.append({**p.to_dict(), "match_reason": f"Same phone number: {phone}"})
             seen_ids.add(p.id)
 
-    # 3. Fuzzy name match (sorted tokens + close age or sex)
     if name:
         tokens = normalize_name(name).split()
         if tokens:
@@ -1716,7 +1705,6 @@ def check_patient_duplicates():
             for c in candidates:
                 c_tokens = set((c.name_key or "").split())
                 overlap = len(set(tokens) & c_tokens)
-                # If at least 2 tokens match or name is single word and identical
                 if (overlap >= 2) or (len(tokens) == 1 and tokens[0] in c_tokens):
                     is_close_age = age is not None and c.age_years is not None and abs(c.age_years - age) <= 3
                     is_same_sex = sex and c.sex and sex == c.sex
@@ -1731,7 +1719,6 @@ def check_patient_duplicates():
 @app.route("/api/patients/merge", methods=["POST"])
 @login_required
 def merge_patients():
-    """Combines secondary patient into primary. Reassigns encounters and soft-deletes secondary."""
     data = request.get_json(silent=True) or {}
     primary_id = data.get("primary_id")
     secondary_id = data.get("secondary_id")
@@ -1751,13 +1738,11 @@ def merge_patients():
         return fail("Secondary patient not found or already merged.", 404)
 
     try:
-        # Reassign all encounters to primary
         Encounter.query.filter_by(patient_id=secondary.id).update({
             "patient_id": primary.id,
             "patient_name": primary.full_name
         })
 
-        # Copy any missing demographic info from secondary to primary
         if not primary.phone and secondary.phone: primary.phone = secondary.phone
         if not primary.hospital_id and secondary.hospital_id: primary.hospital_id = secondary.hospital_id
         if not primary.age_years and secondary.age_years: primary.age_years = secondary.age_years
@@ -1765,7 +1750,6 @@ def merge_patients():
         if not primary.village_lga and secondary.village_lga: primary.village_lga = secondary.village_lga
         if not primary.allergies and secondary.allergies: primary.allergies = secondary.allergies
 
-        # Soft-delete secondary record and point to primary
         secondary.is_active = False
         secondary.merged_into_id = primary.id
 
@@ -1783,7 +1767,6 @@ def merge_patients():
 @app.route("/api/patients/undo-merge/<int:secondary_id>", methods=["POST"])
 @login_required
 def undo_merge(secondary_id):
-    """Reverses an accidental merge."""
     facility_id = session["facility_id"]
     secondary = db.session.get(Patient, secondary_id)
 
