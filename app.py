@@ -2,6 +2,9 @@
 
 Flow of a patient encounter:
     translation -> triage -> diagnosis -> referral
+
+Pipeline for intake:
+    Whisper (Groq) transcribes  ->  Gemini API translates  ->  LiteLLM analyzes (TC/vitals/dialect)
 """
 import base64
 import hmac
@@ -20,7 +23,7 @@ from datetime import datetime, timezone
 from functools import wraps
 
 import qrcode
-import google.generativeai as genai  # <-- ADDED FOR GEMINI TRANSLATION
+import google.generativeai as genai  # <-- Gemini SDK for translation
 from dotenv import load_dotenv
 from flask import (Flask, jsonify, redirect, render_template, request,
                    send_from_directory, session, url_for)
@@ -272,42 +275,18 @@ with app.app_context():
 _groq = None
 _llm = None
 
-# Configure Gemini API for strict translation
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-gemini_model = genai.GenerativeModel("gemini-1.5-flash")
-
-def strict_translate(text):
-    """Translates text using Gemini API with strict rules to prevent hallucination."""
-    if not text or not text.strip():
-        return ""
-    
-    prompt = (
-        "Translate the following text to English.\n"
-        "STRICT RULES:\n"
-        "1. Translate LITERALLY. Do NOT add, infer, or invent any medical symptoms (like vomiting, fever, or pain) unless the words are explicitly in the text.\n"
-        "2. If the text contains spelling errors or merged words (e.g., 'Abubu wa'), fix the spacing based on phonetic similarity, but do not change the core meaning.\n"
-        "3. Return ONLY the translated English text. No quotes, no markdown, no explanations.\n\n"
-        f"Text to translate: \"{text}\""
-    )
-    
-    try:
-        response = gemini_model.generate_content(
-            prompt,
-            generation_config=genai.types.GenerationConfig(
-                temperature=0.1,
-                max_output_tokens=300
-            )
-        )
-        return response.text.strip().strip('"\'')
-    except Exception as e:
-        logger.error(f"Gemini translation failed: {e}")
-        return text  # Safe fallback to original text if API fails
-
+# ---- Gemini (direct SDK) for TRANSLATION ONLY ----
+# A loud startup check so a missing key is never silent again.
+_GEMINI_KEY = os.getenv("GEMINI_API_KEY")
+if not _GEMINI_KEY:
+    logger.warning("⚠️ GEMINI_API_KEY is NOT set. Translation will fall back to the raw transcript (echo bug).")
+else:
+    genai.configure(api_key=_GEMINI_KEY)
+    gemini_model = genai.GenerativeModel("gemini-1.5-flash")
 
 # ---- Speech-to-text settings ----
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-large-v3")
 MIN_AUDIO_BYTES = 2000   # about 0.5 s; one-word answers such as a town name must still pass
-STT_PROMPT_CLINIC = "Medical consultation in Nigeria. Focus only on clear speech. Ignore background noise, coughing, or pauses. Terms: malaria, zazzabi, BP, temperature, headache, stomach."
 # Phrases Whisper tends to invent when it hears silence or noise.
 WHISPER_GHOSTS = {
     "thank you", "thanks", "thank you for watching", "thanks for watching", "you", "bye", "bye bye",
@@ -354,25 +333,46 @@ def _seg(seg, key, default=None):
     return seg.get(key, default) if isinstance(seg, dict) else getattr(seg, key, default)
 
 
-def _prompt_echo_detected(text, prompt):
-    """True if the transcription contains a suspicious multi-word slice of the prompt."""
-    if not text:
-        return False
-    # Normalize both sides
-    t_norm = re.sub(r"[^\w\s]", "", text.lower())
-    t_words = t_norm.split()
-    p_words = re.sub(r"[^\w\s]", "", prompt.lower()).split()
-    # Build all 4-word shingles from the prompt
-    shingles = {" ".join(p_words[i:i + 4]) for i in range(len(p_words) - 3)}
-    # If any 4-word window of the transcription matches a prompt shingle → echo
-    for i in range(len(t_words) - 3):
-        if " ".join(t_words[i:i + 4]) in shingles:
-            return True
-    return False
+def strict_translate(text, lang_hint=None):
+    """STAGE 2: Gemini translates the transcript to clean English. Literal, no clinical inference."""
+    if not text or not text.strip():
+        return ""
+    if not _GEMINI_KEY:
+        logger.error("strict_translate called without GEMINI_API_KEY; returning raw text.")
+        return text
+
+    lang_line = ""
+    if lang_hint == "ha":
+        lang_line = "The source language is Hausa."
+    elif lang_hint == "en":
+        lang_line = "The source language is English or Nigerian Pidgin."
+    # else: let Gemini auto-detect
+
+    prompt = (
+        "You are a professional translator. The input below is a voice-to-text transcript that may be in "
+        "Hausa, Nigerian Pidgin, or English, and may contain phonetic misspellings, merged words, or broken "
+        "spacing. Do two things silently: (1) reconstruct the intended words from the phonetic garble, "
+        "(2) translate the FULL meaning into natural English. "
+        "HARD RULES: Output ONLY the English translation. No quotes, no markdown, no notes, no left-over "
+        "Hausa/Pidgin words. Do NOT add or invent any medical symptoms that are not present in the input. "
+        "If the input is already clear English, return it unchanged. "
+        f"{lang_line}\n\nInput: \"{text}\""
+    )
+    try:
+        response = gemini_model.generate_content(
+            prompt,
+            generation_config=genai.types.GenerationConfig(temperature=0.1, max_output_tokens=400),
+        )
+        out = (response.text or "").strip().strip('"\'')
+        logger.info(f"🈯 Gemini translation: '{text[:60]}' -> '{out[:60]}'")
+        return out or text
+    except Exception as e:
+        logger.error(f"❌ Gemini translation failed ({e}); falling back to raw transcript.")
+        return text
 
 
-def transcribe(audio_file, language=None, prompt=STT_PROMPT_CLINIC):
-    """Whisper transcription — NO prompt sent to Groq to prevent echo bugs."""
+def transcribe(audio_file, language=None):
+    """STAGE 1: Whisper (Groq) transcribes. No prompt sent to avoid echo bugs."""
     data = audio_file.read()
     if len(data) < MIN_AUDIO_BYTES:
         raise ValueError("Recording too short. Hold the button and speak clearly.")
@@ -397,8 +397,6 @@ def transcribe(audio_file, language=None, prompt=STT_PROMPT_CLINIC):
         model=WHISPER_MODEL,
         response_format="verbose_json",
         temperature=0.0,
-        # NOTE: prompt intentionally NOT sent. Whisper echoes prompt fragments
-        # as "transcription" when audio is silent/noisy. Removing it fixes that.
     )
     if language in ("en", "ha"):
         kwargs["language"] = language
@@ -989,7 +987,7 @@ def update_patient(patient_id):
 
 
 # ==========================================
-# 8. TRANSLATOR & TC ACTIONS
+# 8. TRANSLATOR & TC ACTIONS  (3-STAGE PIPELINE)
 # ==========================================
 @app.route("/api/translate", methods=["POST"])
 @login_required
@@ -998,10 +996,10 @@ def translate_audio():
     if not audio_file:
         return fail("No audio file provided.", 400)
 
-    # Force language to prevent Whisper auto-detect roulette
     raw_lang = (request.form.get("language") or "").lower()
-    lang = STT_LANGS.get(raw_lang) or "en"
+    lang = STT_LANGS.get(raw_lang)  # None if auto-detect
 
+    # STAGE 1: Whisper transcribes
     try:
         raw_text = transcribe(audio_file, lang)
     except ValueError as e:
@@ -1011,27 +1009,72 @@ def translate_audio():
             return fail("The speech service is busy. Wait a moment and try again.", 429, e)
         return fail("Could not transcribe the audio. Check connection and try again.", 502, e)
 
-    # --- STRICT GEMINI TRANSLATION ONLY ---
-    # This will fix merged words but will NOT invent "vomiting" if it's not there.
-    translation = strict_translate(raw_text)
-    
-    detected_dialect = "Hausa" if lang == "ha" else ("Pidgin" if raw_lang == "pcm" else "English")
+    # STAGE 2: Gemini translates (literal, no clinical inference)
+    translation = strict_translate(raw_text, lang_hint=lang)
 
-    return jsonify({
-        "patient_name_mentioned": None, 
-        "dialect": detected_dialect,
-        "statement": raw_text,
-        "translation": translation,
-        "vitals": {},  
-        "conclusion": translation, 
-        "tc_actions": [
+    # STAGE 3: LiteLLM analyzes the CLEAN translated text -> TC box, vitals, dialect, conclusion
+    prompt = f"""
+    You are a clinical data extraction assistant for a community health worker in Nigeria.
+    You are given a patient statement. The TRANSLATION is the authoritative English meaning.
+    The ORIGINAL is the raw speech-to-text (may contain phonetic errors) — use it only to detect the dialect.
+
+    ORIGINAL: "{raw_text}"
+    TRANSLATION: "{translation}"
+
+    Return ONLY valid JSON (no markdown, no extra text):
+    {{
+      "patient_name_mentioned": "Patient name if explicitly mentioned, otherwise null",
+      "dialect": "Detected language of the ORIGINAL: Hausa, Pidgin, or English",
+      "vitals": {{
+        "temp": "temperature in Celsius or 'N/A'",
+        "bp_sys": "systolic BP or 'N/A'",
+        "bp_dia": "diastolic BP or 'N/A'",
+        "spo2": "oxygen saturation % or 'N/A'",
+        "hr": "heart rate or 'N/A'"
+      }},
+      "conclusion": "One-sentence clinical summary strictly based on the TRANSLATION",
+      "tc_actions": [
+        {{
+          "claim": "Symptom extracted from the TRANSLATION",
+          "instruction": "Physical non-invasive instruction for the worker (e.g. Ask patient to point with one finger to where it hurts)",
+          "expected": "Expected physical response (e.g. Points to forehead or crown of head)"
+        }}
+      ]
+    }}
+    Rules: Extract ONLY what is in the TRANSLATION. Do NOT invent symptoms. Provide 1 to 3 non-invasive
+    physical checks (pointing, showing fingers for days). No sensitive touching. No simple Yes/No questions.
+    """
+    try:
+        data = llm_json(prompt, 0.2)
+    except Exception as e:
+        logger.error(f"LiteLLM analysis failed: {e}")
+        data = {}
+
+    # Merge: never let the model rewrite the transcript; keep exact heard text + Gemini translation
+    data["statement"] = raw_text
+    data["translation"] = translation or raw_text
+
+    if not data.get("tc_actions"):
+        data["tc_actions"] = [
             {
                 "claim": "Reported symptoms",
                 "instruction": "Ask the patient to point with their hand to where they feel discomfort.",
-                "expected": "Points to location of pain"
+                "expected": "Points to location of pain",
             }
         ]
-    })
+    if not data.get("dialect"):
+        data["dialect"] = "Hausa" if lang == "ha" else ("English" if lang == "en" else "Unknown")
+
+    vitals = data.get("vitals") or {}
+    stored = {
+        "temp": to_float(vitals.get("temp")),
+        "sys_bp": to_float(vitals.get("bp_sys")),
+        "dia_bp": to_float(vitals.get("bp_dia")),
+        "spo2": to_float(vitals.get("spo2")),
+        "hr": to_float(vitals.get("hr")),
+    }
+    data["vitals"] = {k: v for k, v in stored.items() if v is not None}
+    return jsonify(data)
 
 
 @app.route("/api/intake/save", methods=["POST"])
@@ -1422,7 +1465,7 @@ def patient_voice():
 
     try:
         # Auto-detect language here: companion users speak Hausa, Pidgin or English.
-        user_text = transcribe(audio_file, None, STT_PROMPT_CLINIC)
+        user_text = transcribe(audio_file, None)
     except ValueError as e:
         return fail(str(e), 400)
     except Exception as e:
@@ -1437,10 +1480,7 @@ def patient_voice():
             db.session.add(patient)
             db.session.flush()
 
-        translated = llm_text([
-            {"role": "system", "content": "Translate to English. Return ONLY the translated text."},
-            {"role": "user", "content": user_text},
-        ], 0.3)
+        translated = strict_translate(user_text)
 
         recent = (ChatMessage.query.filter_by(user_id=patient.id)
                   .order_by(ChatMessage.created_at.desc()).limit(10).all())[::-1]
