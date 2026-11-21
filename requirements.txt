@@ -9,3 +9,4 @@ qrcode[pil]
 gTTS
 psycopg2-binary
 psycopg[binary]
+google-generativeai==0.8.3
