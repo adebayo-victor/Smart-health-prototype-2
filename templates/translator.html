@@ -84,6 +84,16 @@
   <button id="dismissBtn" class="mt-2 min-h-11 text-sm font-bold underline">Dismiss and try again</button>
 </div>
 
+<!-- Not sure what the patient said: two likely readings, each with its own TC checks -->
+<section id="ambiguousArea" class="hidden space-y-4 mb-6" aria-labelledby="sAmb">
+  <div class="p-4 bg-warn-soft border-2 border-warn/50 rounded-xl" role="alert">
+    <h2 id="sAmb" class="font-bold text-warn-dark text-sm mb-1">Not sure what the patient said</h2>
+    <p class="text-sm text-warn-dark">Two readings are possible. Ask the patient to do the checks under each one, then pick the reading that matches. If neither fits, record again.</p>
+  </div>
+  <div id="readingCards" class="space-y-4"></div>
+  <button id="rerecordBtn" type="button" class="w-full min-h-12 bg-slate-200 text-ink rounded-xl font-bold hover:bg-slate-300 transition">Neither fits. Record again</button>
+</section>
+
 <!-- Step 3: Read-Only Translation + TC Action Box -->
 <section id="resultsArea" class="hidden space-y-6" aria-labelledby="s3">
   <div>
@@ -254,7 +264,7 @@ const picker = new SH.PatientPicker($('patientPicker'));
 
 $('translateBtn').addEventListener('click', async (e) => {
   if (!audio) return SH.toast('Please record or upload audio first.', 'error');
-  show('errorState', false); show('resultsArea', false); show('nextStepsArea', false);
+  show('errorState', false); show('resultsArea', false); show('nextStepsArea', false); show('ambiguousArea', false);
   const form = new FormData();
   form.append('audio', audio.blob, audio.filename);
   const lang = $('speechLang').value;
@@ -262,7 +272,8 @@ $('translateBtn').addEventListener('click', async (e) => {
 
   try {
     extractedData = await SH.busy(e.currentTarget, 'Transcribing and extracting', () => SH.api('/api/translate', { form }));
-    renderIntakeView(extractedData);
+    if (extractedData.mode === 'ambiguous') renderAmbiguousChoice(extractedData);
+    else renderIntakeView(extractedData);
   } catch (err) {
     $('errorMessage').textContent = err.message;
     show('errorState');
@@ -271,6 +282,41 @@ $('translateBtn').addEventListener('click', async (e) => {
 $('dismissBtn').addEventListener('click', () => { show('errorState', false); clearAudio(); });
 
 const known = (v) => v !== null && v !== undefined && v !== '' && String(v).toUpperCase() !== 'N/A';
+
+// Two likely readings, each with its own TC checks. Picking one turns the reply into an ordinary single reading.
+function renderAmbiguousChoice(d) {
+  const alts = d.alternatives || [];
+  $('readingCards').innerHTML = alts.map((r, i) => `
+    <div class="bg-white rounded-2xl border-2 border-slate-200 p-4 space-y-3">
+      <div class="flex items-center justify-between">
+        <span class="text-xs font-bold uppercase tracking-wider text-brand">Reading ${'AB'[i]}</span>
+        <span class="text-xs font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">${i === 0 ? 'Most likely' : 'Also possible'}</span>
+      </div>
+      <p class="text-ink font-bold text-base leading-snug">${SH.esc(r.translation || '')}</p>
+      ${r.conclusion ? `<p class="text-xs text-slate-700"><strong>Clinical Summary:</strong> ${SH.esc(r.conclusion)}</p>` : ''}
+      <div class="space-y-2">
+        <p class="text-xs font-bold text-slate-500">Ask the patient to do these to check this reading</p>
+        ${(r.tc_actions || []).map((a) => `
+          <div class="bg-slate-50 rounded-xl border border-slate-100 p-2.5 text-xs space-y-0.5">
+            <p class="font-bold text-ink">${SH.esc(a.instruction)}</p>
+            <p class="text-slate-600"><strong>Expected reaction:</strong> ${SH.esc(a.expected)}</p>
+          </div>`).join('')}
+      </div>
+      <button type="button" class="pick-reading w-full min-h-12 bg-brand text-white rounded-xl font-bold hover:bg-brand-dark transition" data-idx="${i}">This is what the patient meant</button>
+    </div>`).join('');
+
+  document.querySelectorAll('.pick-reading').forEach((btn) => btn.addEventListener('click', () => {
+    const { alternatives, ...base } = extractedData;
+    extractedData = { ...base, ...alts[Number(btn.dataset.idx)] };
+    show('ambiguousArea', false);
+    renderIntakeView(extractedData);
+  }));
+
+  show('translateBtn', false);
+  show('ambiguousArea');
+  $('ambiguousArea').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+$('rerecordBtn').addEventListener('click', () => { show('ambiguousArea', false); clearAudio(); });
 
 function renderIntakeView(d) {
   tcResults = {};
