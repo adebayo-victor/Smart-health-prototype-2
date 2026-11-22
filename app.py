@@ -453,6 +453,65 @@ def gemini_translate(text, target="English", lang_hint=None):
         return None
 
 
+def gemini_translation_options(text, lang_hint=None):
+    """Three ranked English readings of a noisy transcript, for the companion's meta-reasoning.
+
+    Returns ([{"text", "confidence"}, ...] best first, spoken language "ha"/"pcm"/"en"/None), or (None, None)
+    if Gemini is unavailable or its reply is unusable. The caller then carries on exactly as before with
+    gemini_translate(), so this can never break the companion. gemini_translate() itself is untouched.
+    """
+    if not text or not text.strip() or gemini_model is None:
+        return None, None
+
+    lang_line = ""
+    if lang_hint == "ha":
+        lang_line = "The source language is Hausa."
+    elif lang_hint == "en":
+        lang_line = "The source language is English or Nigerian Pidgin."
+    prompt = (
+        "You are a forensic sociolinguist and low-resource language reconstruction specialist fluent in "
+        "Hausa, Nigerian Pidgin, and English, working as an expert medical interpreter. The input below is a "
+        "noisy voice-to-text transcript that may contain phonetic misspellings, missing diacritics, merged or "
+        "split words, broken spacing, and jumbled word order. Silently reconstruct what the speaker most "
+        "likely meant, then give EXACTLY 3 plausible clear, natural English translations, ranked from most to "
+        "least likely. Each has an integer confidence percent. The three confidences MUST add up to exactly 100. "
+        "The translations should differ only in how an unclear word or phrase is understood. "
+        "If the input is already clear English, translation 1 is the input unchanged (95-100) and "
+        "translation 2 a minor rephrase. "
+        "HARD RULES: Do NOT add, guess, or invent any medical symptoms or details that are not supported by the "
+        "input. No left-over Hausa or Pidgin words in the translations. Also say which language the speaker used: "
+        '"ha" for Hausa, "pcm" for Nigerian Pidgin, "en" for English. '
+        'Return ONLY valid JSON, no markdown: {"options": [{"text": "...", "confidence": 0}, '
+        '{"text": "...", "confidence": 0}, {"text": "...", "confidence": 0}], "language": "ha"} '
+        f"{lang_line}\n\nInput: \"{text}\""
+    )
+
+    try:
+        response = gemini_model.generate_content(
+            prompt,
+            # Same generous limit as gemini_translate(): thinking tokens count against it.
+            generation_config=genai.types.GenerationConfig(temperature=0.1, max_output_tokens=2048,
+                                                           response_mime_type="application/json"),
+            safety_settings=_GEMINI_SAFETY,
+            request_options={"timeout": int(os.getenv("GEMINI_TIMEOUT", "15"))},
+        )
+        data = parse_json_reply(response.text or "")
+        rows = [(str(r["text"]).strip().strip('"\''), float(r["confidence"])) for r in data["options"]]
+    except Exception as e:
+        logger.error(f"Gemini translation options failed ({e}).")
+        return None, None
+
+    rows = sorted((r for r in rows if r[0] and r[1] >= 0), key=lambda r: r[1], reverse=True)[:3]
+    total = sum(c for _, c in rows)
+    if not rows or total <= 0:
+        logger.warning("Gemini returned no usable translation options.")
+        return None, None
+    options = [{"text": t, "confidence": round(c * 100 / total)} for t, c in rows]
+    lang = str(data.get("language") or "").strip().lower()
+    logger.info("Gemini options (confidence): %s", [o["confidence"] for o in options])
+    return options, (lang if lang in ("ha", "pcm", "en") else None)
+
+
 def _prompt_echo_detected(text, prompt):
     """True if the transcription contains a suspicious multi-word slice of the prompt."""
     if not text:
@@ -1510,6 +1569,44 @@ COMPANION_STT_LANG = (os.getenv("COMPANION_STT_LANG", "ha") or "").strip().lower
 # Gemini translates the patient's Hausa/Pidgin to English BEFORE the LiteLLM model answers (on by default,
 # because Gemini is far better at Hausa). Set COMPANION_PRETRANSLATE=0 only to skip it for speed tests.
 COMPANION_PRETRANSLATE = os.getenv("COMPANION_PRETRANSLATE", "1") != "0"
+# Meta-reasoning: Gemini offers 3 ranked readings of what the patient said and plain Python (decide_route)
+# decides whether to answer, ask "did you mean X or Y?", or ask them to repeat. Margin = top confidence minus
+# second confidence, in points out of 100. Set COMPANION_META_REASONING=0 to switch it off.
+COMPANION_META_REASONING = os.getenv("COMPANION_META_REASONING", "1") != "0"
+CONFIDENT_MARGIN = int(os.getenv("CONFIDENT_MARGIN", "25"))
+MIN_TOP_CONFIDENCE = int(os.getenv("MIN_TOP_CONFIDENCE", "40"))
+
+
+def decide_route(options):
+    """Margin-of-victory router. Pure Python, no AI call. `options` is [{"text", "confidence"}].
+
+    confident      -> the top reading wins by CONFIDENT_MARGIN or more: pass 1 translation
+    ambiguous      -> two readings are close: pass the top 2
+    unintelligible -> nothing is trusted (top reading below MIN_TOP_CONFIDENCE, so the split is nearly flat): pass none
+    """
+    ranked = sorted(options or [], key=lambda o: o["confidence"], reverse=True)
+    if not ranked:
+        return {"mode": "unintelligible", "translations": [], "margin": 0}
+    top = ranked[0]["confidence"]
+    margin = top - (ranked[1]["confidence"] if len(ranked) > 1 else 0)
+    if top < MIN_TOP_CONFIDENCE:
+        mode, keep = "unintelligible", 0
+    elif margin >= CONFIDENT_MARGIN:
+        mode, keep = "confident", 1
+    else:
+        mode, keep = "ambiguous", 2
+    return {"mode": mode, "translations": [o["text"] for o in ranked[:keep]], "margin": margin}
+
+
+def emergency_reading(user_text, options):
+    """The reading to answer if anything the patient may have said matches an emergency pattern, else None.
+    Missing an emergency is worse than a false alarm, so the router never holds one back to ask a question."""
+    if EMERGENCY_PATTERNS.search(user_text or ""):
+        return options[0]["text"]
+    for o in options:
+        if EMERGENCY_PATTERNS.search(o["text"]):
+            return o["text"]
+    return None
 
 
 def get_companion(phone, create=True):
@@ -1594,6 +1691,14 @@ REVOKE_MESSAGES = {
 }
 
 
+# Asked when the router cannot trust ANY reading of the audio. No AI call, so it is instant.
+REPEAT_MESSAGES = {
+    "ha": "Yi haƙuri, ban ji sosai ba. Don Allah a sake faɗa a hankali.",
+    "pcm": "Sorry, I no hear you well. Abeg talk am again, slowly.",
+    "en": "Sorry, I could not hear that clearly. Please say it again, slowly.",
+}
+
+
 def detect_revoke_request(raw):
     """(is_revoke, reply_language) for a transcript that asks to cancel a referral code."""
     t = re.sub(r"[’'`]", " ", (raw or "").lower())
@@ -1667,7 +1772,8 @@ REFERRAL CODE
 OUTPUT: return ONLY one valid JSON object. No markdown fences, no extra text."""
 
 
-def answer_patient(user_text, translated_text, past_memories, recent_chat, pending_emergency=None, has_pass=False):
+def answer_patient(user_text, translated_text, past_memories, recent_chat, pending_emergency=None, has_pass=False,
+                   alt_translation=None):
     pending_active = bool(pending_emergency and pending_emergency.get("active"))
     context = []
     if pending_active:
@@ -1680,7 +1786,15 @@ def answer_patient(user_text, translated_text, past_memories, recent_chat, pendi
     context.append(f"PAST CONTEXT (their history):\n{past_memories or 'No past history.'}")
     context.append(f"RECENT CONVERSATION:\n{recent_chat or 'This is the first message.'}")
     context.append(f'ORIGINAL MESSAGE (speech-to-text; decides the reply language):\n"{user_text}"')
-    if translated_text:
+    if translated_text and alt_translation:
+        context.append(
+            "UNCERTAIN HEARING: speech recognition could not settle what the person meant. They most likely said "
+            f'ONE of these:\n(A) "{translated_text}"\n(B) "{alt_translation}"\n'
+            "Do NOT give health advice, reassurance or a diagnosis yet, and do not pick one for them. Instead ask "
+            "ONE short, friendly question, in the language of the ORIGINAL message, that puts both meanings in "
+            'simple words so they can say which one they meant. Set "is_emergency" to true only if the ORIGINAL '
+            'message itself clearly describes an emergency. Leave "spoken_location" null and "revoke_referral" false.')
+    elif translated_text:
         context.append(f'ENGLISH TRANSLATION (authoritative meaning, already checked; rely on it):\n"{translated_text}"')
 
     user_english_line = "" if translated_text else \
@@ -1739,6 +1853,18 @@ def revoke_response(user_text, reply, lang, outcome):
     })
 
 
+def repeat_response(user_text, reply, lang):
+    return jsonify({
+        "user_text": user_text,
+        "ai_text_local": reply,
+        "audio_url": None,                       # fetched separately by /api/patient_tts, as for every reply
+        "tts_lang": "ha" if lang == "ha" else "en",
+        "emergency_alert": {"is_emergency": False, "reason": None},
+        "auto_referral": None,
+        "referral_revoked": False,
+    })
+
+
 @app.route("/api/patient_voice", methods=["POST"])
 def patient_voice():
     t0 = time.time()
@@ -1782,10 +1908,35 @@ def patient_voice():
 
         # Gemini translates first (it is the one that handles Hausa well). Passing the language hint
         # helps it; on failure it returns None and the LiteLLM model translates inside its own answer.
-        translated = None
+        translated = alt_translation = None
+        mode = "confident"
         if COMPANION_PRETRANSLATE:
-            translated = gemini_translate(user_text, "English",
-                                          COMPANION_STT_LANG if COMPANION_STT_LANG in ("en", "ha") else None)
+            stt_lang = COMPANION_STT_LANG if COMPANION_STT_LANG in ("en", "ha") else None
+            options = heard_lang = None
+            # Not while a location is awaited: a one-word town name must never be bounced as "unclear".
+            if COMPANION_META_REASONING and not pending_active:
+                options, heard_lang = gemini_translation_options(user_text, stt_lang)
+            if options:
+                route = decide_route(options)
+                alarming = emergency_reading(user_text, options)
+                if alarming:
+                    translated = alarming
+                else:
+                    mode = route["mode"]
+                    translated = route["translations"][0] if route["translations"] else options[0]["text"]
+                    if mode == "ambiguous":
+                        alt_translation = route["translations"][1]
+                logger.info("patient_voice meta: mode=%s margin=%s emergency_override=%s", route["mode"], route["margin"], bool(alarming))
+            else:
+                translated = gemini_translate(user_text, "English", stt_lang)   # Gemini off or no usable options
+
+        # Nothing is trustworthy: ask them to repeat, with no AI call, no advice and nothing remembered.
+        if mode == "unintelligible":
+            rlang = heard_lang or (patient.preferred_language if patient.preferred_language in REPEAT_MESSAGES else "ha")
+            save_exchange(patient, user_text, "(unclear speech)", REPEAT_MESSAGES[rlang], REPEAT_MESSAGES["en"])
+            db.session.commit()
+            logger.info("patient_voice repeat-request: stt=%.1fs total=%.1fs", t1 - t0, time.time() - t0)
+            return repeat_response(user_text, REPEAT_MESSAGES[rlang], rlang)
 
         recent = (ChatMessage.query.filter_by(user_id=patient.id)
                   .order_by(ChatMessage.created_at.desc()).limit(8).all())[::-1]
@@ -1805,14 +1956,16 @@ def patient_voice():
         has_pass = pending_passes(patient).first() is not None
         t2 = time.time()
         ai = answer_patient(user_text, translated, long_term, recent_text,
-                            pending_emergency=pending_emergency, has_pass=has_pass)
+                            pending_emergency=pending_emergency, has_pass=has_pass, alt_translation=alt_translation)
         t3 = time.time()
         translated = str(ai.get("user_english") or translated or user_text)
+        if alt_translation:   # keep the doubt on the record so the next turn knows the reading was a guess
+            translated = f"(unclear) {translated} OR {alt_translation}"
         detected = str(ai.get("detected_language", "English"))
         lang = reply_lang_code(detected)
 
         # The model heard a cancel request that the word rules did not catch.
-        if ai.get("revoke_referral") is True and (has_pass or pending_active):
+        if ai.get("revoke_referral") is True and not alt_translation and (has_pass or pending_active):
             outcome = revoke_companion_referral(patient)
             save_exchange(patient, user_text, translated, REVOKE_MESSAGES[lang][outcome], REVOKE_MESSAGES["en"][outcome])
             db.session.commit()
@@ -1821,11 +1974,12 @@ def patient_voice():
 
         answer_en = str(ai.get("answer_english") or "")
         answer_local = str(ai.get("answer_local") or answer_en)
-        save_exchange(patient, user_text, translated, answer_local, answer_en, ai.get("keywords"))
+        # An uncertain reading is never indexed into long-term memory.
+        save_exchange(patient, user_text, translated, answer_local, answer_en, None if alt_translation else ai.get("keywords"))
         db.session.commit()
 
         # An open emergency pass is created only for a real emergency, and only ONE unclaimed pass per person.
-        spoken_loc = str(ai.get("spoken_location") or "").strip()[:100]
+        spoken_loc = "" if alt_translation else str(ai.get("spoken_location") or "").strip()[:100]
         auto_referral = None
         if spoken_loc and (pending_active or ai.get("is_emergency")):
             try:
