@@ -317,7 +317,7 @@ _llm = None
 
 # ---- Gemini (direct SDK): the translator ----
 _GEMINI_KEY = os.getenv("GEMINI_API_KEY")
-gemini_model = None
+gemini_model = "gemini-2.5-flash"
 _GEMINI_SAFETY = None
 if not _GEMINI_KEY:
     logger.warning("GEMINI_API_KEY is NOT set. Translation will fall back to the LiteLLM model.")
