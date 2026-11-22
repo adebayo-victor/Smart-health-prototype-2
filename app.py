@@ -1150,6 +1150,85 @@ def update_patient(patient_id):
 # ==========================================
 # 8. TRANSLATOR & TC ACTIONS  (3-STAGE PIPELINE)
 # ==========================================
+def ambiguous_intake(raw_text, readings):
+    """Two likely readings of a statement the router could not settle. One analysis call gives each reading its own
+    clinical summary, vitals and TC actions, so the worker can tell them apart with the patient in front of them.
+
+    Returns the usual /api/translate payload for the most likely reading, plus mode="ambiguous" and
+    `alternatives` (both readings: translation, vitals, conclusion, tc_actions). Raises if the AI reply is unusable."""
+    reading_a, reading_b = readings
+    prompt = f"""
+    You are a medical data extraction assistant. Analyze this patient statement recorded by a health worker in Nigeria.
+    ORIGINAL: "{raw_text}"
+    Speech recognition could not settle what the patient meant, so there are TWO likely English readings:
+    READING A: "{reading_a}"
+    READING B: "{reading_b}"
+    Treat each reading separately and extract ONLY what is in that reading. The ORIGINAL is raw speech-to-text and may
+    contain phonetic errors, so use it only to detect the dialect and any patient name.
+    Each reading object has exactly these fields:
+    {{
+      "vitals": {{
+        "temp": "temperature in Celsius or 'N/A'",
+        "bp_sys": "systolic BP or 'N/A'",
+        "bp_dia": "diastolic BP or 'N/A'",
+        "spo2": "oxygen saturation % or 'N/A'",
+        "hr": "heart rate or 'N/A'"
+      }},
+      "conclusion": "One-sentence clinical summary of the main complaint in THIS reading",
+      "tc_actions": [
+        {{
+          "claim": "Symptom extracted (e.g. Severe Headache)",
+          "instruction": "Physical non-invasive instruction for the worker to give the patient (e.g. Ask patient to point with one finger to where it hurts)",
+          "expected": "Expected physical response (e.g. Points to forehead or crown of head)"
+        }}
+      ]
+    }}
+    Return ONLY valid JSON (no markdown, no extra text):
+    {{
+      "patient_name_mentioned": "Patient name if explicitly mentioned in statement, otherwise null",
+      "dialect": "Detected language of the original: Hausa, Pidgin, or English",
+      "readings": [ <object for READING A>, <object for READING B> ]
+    }}
+    Rules for tc_actions: Provide 1 to 3 non-invasive physical checks per reading (pointing, showing fingers for days). Choose checks that would confirm THAT reading and, where possible, tell it apart from the other reading. No sensitive touching. No simple Yes/No questions. Do NOT invent symptoms.
+    """
+    data = llm_json(prompt, 0.2)
+
+    rows = data.get("readings")
+    rows = rows if isinstance(rows, list) else []
+    alternatives = []
+    for i, translation in enumerate(readings):
+        row = rows[i] if i < len(rows) and isinstance(rows[i], dict) else {}
+        vitals = row.get("vitals") or {}
+        stored = {
+            "temp": to_float(vitals.get("temp")),
+            "sys_bp": to_float(vitals.get("bp_sys")),
+            "dia_bp": to_float(vitals.get("bp_dia")),
+            "spo2": to_float(vitals.get("spo2")),
+            "hr": to_float(vitals.get("hr")),
+        }
+        alternatives.append({
+            "translation": translation,
+            "vitals": {k: v for k, v in stored.items() if v is not None},
+            "conclusion": row.get("conclusion"),
+            "tc_actions": row.get("tc_actions") or [
+                {
+                    "claim": "Reported symptoms",
+                    "instruction": "Ask the patient to point with their hand to where they feel discomfort.",
+                    "expected": "Points to location of pain"
+                }
+            ],
+        })
+
+    # Top level mirrors the most likely reading, so the payload keeps the shape of a normal reply.
+    return {
+        "mode": "ambiguous",
+        "patient_name_mentioned": data.get("patient_name_mentioned"),
+        "dialect": data.get("dialect"),
+        **alternatives[0],
+        "alternatives": alternatives,
+    }
+
+
 @app.route("/api/translate", methods=["POST"])
 @login_required
 def translate_audio():
@@ -1172,9 +1251,34 @@ def translate_audio():
         return fail("Could not transcribe the audio. Check connection and try again.", 502, e)
 
     # STAGE 2: Gemini translates. None means Gemini is unavailable, and LiteLLM translates in stage 3.
+    # With meta-reasoning on, Gemini offers 3 ranked readings and decide_route() picks what to do with them:
+    # confident -> the top reading, exactly as before; ambiguous -> two readings, each with its own TC checks;
+    # unintelligible -> ask for a new recording. No usable options -> the original single translation.
     t1 = time.time()
-    translation = gemini_translate(raw_text, "English", lang)
+    route = None
+    if INTAKE_META_REASONING:
+        options, _ = gemini_translation_options(raw_text, lang)
+        route = decide_route(options) if options else None
+    if route:
+        logger.info("translate meta: mode=%s margin=%s", route["mode"], route["margin"])
+        if route["mode"] == "unintelligible":
+            return fail("I could not understand that recording. Ask the patient to repeat slowly and clearly, then record again.", 422)
+    translation = None
+    if route is None:
+        translation = gemini_translate(raw_text, "English", lang)
+    elif route["mode"] == "confident":
+        translation = route["translations"][0]
     t2 = time.time()
+
+    if route and route["mode"] == "ambiguous":
+        try:
+            data = ambiguous_intake(raw_text, route["translations"])
+        except Exception as e:
+            return fail("The AI returned unreadable data. Please try again.", 502, e)
+        logger.info("translate timing (ambiguous): whisper=%.1fs gemini=%.1fs analysis=%.1fs total=%.1fs",
+                    t1 - t0, t2 - t1, time.time() - t2, time.time() - t0)
+        data["statement"] = raw_text   # the record must hold exactly what was heard
+        return jsonify(data)
 
     # STAGE 3: LiteLLM analyses. It no longer has to translate: it reads the clean English and extracts from it.
     if translation:
@@ -1573,6 +1677,8 @@ COMPANION_PRETRANSLATE = os.getenv("COMPANION_PRETRANSLATE", "1") != "0"
 # decides whether to answer, ask "did you mean X or Y?", or ask them to repeat. Margin = top confidence minus
 # second confidence, in points out of 100. Set COMPANION_META_REASONING=0 to switch it off.
 COMPANION_META_REASONING = os.getenv("COMPANION_META_REASONING", "1") != "0"
+# The same router for the health worker's intake (/api/translate). Set INTAKE_META_REASONING=0 to switch it off.
+INTAKE_META_REASONING = os.getenv("INTAKE_META_REASONING", "1") != "0"
 CONFIDENT_MARGIN = int(os.getenv("CONFIDENT_MARGIN", "25"))
 MIN_TOP_CONFIDENCE = int(os.getenv("MIN_TOP_CONFIDENCE", "40"))
 
