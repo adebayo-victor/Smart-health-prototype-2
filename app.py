@@ -1869,13 +1869,14 @@ HOW TO ANSWER
 
 EMERGENCIES (is_emergency = true)
 Heavy bleeding; bleeding or water breaking in pregnancy; fits or convulsions; hard or noisy breathing; not waking or not responding; chest pain; sudden severe headache with stiff neck or confusion; face drooping, one-sided weakness or slurred speech; snake bite; bad burns; poisoning or swallowing chemicals; a baby who is floppy, will not feed or is very hot; severe dehydration (diarrhoea and vomiting with weakness); thoughts of suicide. Mild or ordinary symptoms are NOT emergencies.
-- In an emergency say plainly to go to the nearest hospital NOW. Then, if they have no code yet, ask if they want a hospital code and which town or area they are in.
+- In an emergency say plainly to go to the nearest hospital NOW. Then, if they have no code yet, offer to get them a hospital code right away.
 - "spoken_location" is ONLY the place name (town, area or LGA) the person said. Otherwise null.
 
 REFERRAL CODE (hospital pass)
 - You can create and cancel the person's hospital referral code. The context tells you whether they already have an unclaimed code.
-- CREATE: when the person wants to go to a hospital, or you advise it because it is serious, and they have no code, first ask in one short sentence whether they want a hospital code and which town or area they are in. Set "referral_action" to "create" ONLY when BOTH are true: the person agreed (said yes, or answered your question by naming their town or area) AND "spoken_location" holds that place. Otherwise use "none".
-- When you set "create", say in one short sentence that you are getting the code and it will show on their screen. Never say or invent the code itself.
+- CREATE RIGHT AWAY: when the person asks to go to a hospital, or asks for a referral or a code, and they have no code, set "referral_action" to "create" in this same reply. Do not ask which hospital and do not ask for their town just to make the code. If the person named a particular hospital, town or area, in this message or in PAST CONTEXT or RECENT CONVERSATION, put that name in "spoken_location". If they did not name one, leave "spoken_location" null: the code then works at any nearby hospital, which is fine.
+- OFFER FIRST: if the person did NOT ask for a hospital but you advise one because it is serious, ask in one short sentence whether they want a hospital code, and set "create" only after they say yes.
+- When you set "create", say in one short sentence that the code is on their screen and works at any nearby hospital (or at the place they named). Never say or invent the code itself.
 - If you offered a code in this reply, say so in "answer_english" too, so the next turn knows an offer was made.
 - If they already have a code, never create another. Tell them it is on their screen.
 - CANCEL: set "referral_action" to "cancel" ONLY when the person clearly asks to cancel or no longer needs their code. If you are not sure, ask "Do you want me to cancel your code?" and keep "none".
@@ -1891,9 +1892,9 @@ def answer_patient(user_text, translated_text, past_memories, recent_chat, pendi
     if pending_active:
         context.append(
             f'ACTIVE EMERGENCY: the person already reported an emergency ("{pending_emergency.get("reason")}"). '
-            'Check RECENT CONVERSATION. If you already offered a hospital code and they now name their town or area, '
-            'put it in "spoken_location" and set "referral_action" to "create". If you have not offered yet, offer it '
-            'and ask for their town or area. If they refuse a code, accept kindly and tell them again to go to the nearest hospital.')
+            'Check RECENT CONVERSATION. If you already offered a hospital code and they say yes or name a place, set '
+            '"referral_action" to "create" (put the place in "spoken_location" if they named one; a place is not required). '
+            'If you have not offered yet, offer it. If they refuse a code, accept kindly and tell them again to go to the nearest hospital.')
     if active_pass:
         context.append(f'ACTIVE REFERRAL CODE: the person already has an unclaimed code, shown on their screen, valid at: '
                        f'{active_pass.get("hospitals") or "nearby hospitals"}. Do not create another. Do not say the code aloud.')
@@ -2099,19 +2100,23 @@ def patient_voice():
         save_exchange(patient, user_text, translated, answer_local, answer_en, None if alt_translation else ai.get("keywords"))
         db.session.commit()
 
-        # A pass is created ONLY when the AI asks for one (referral_action = "create") after the person agreed by
-        # voice and gave a place. Still only ONE unclaimed pass per person, and never from an uncertain reading.
+        # A pass is created ONLY when the AI asks for one (referral_action = "create"). A place is optional: with
+        # none, the pass is an open pass valid at any nearby hospital. Still only ONE unclaimed pass per person,
+        # and never from an uncertain reading.
         spoken_loc = "" if alt_translation else str(ai.get("spoken_location") or "").strip()[:100]
+        loc_label = spoken_loc or "any nearby hospital"
         auto_referral = None
-        if spoken_loc and action == "create":
+        if action == "create" and not alt_translation:
             try:
                 existing = pending_passes(patient).first()
                 if existing:
                     auto_referral = pass_payload(existing)
                 else:
-                    matched_centers = MedicalCenter.query.filter(
-                        db.or_(MedicalCenter.name.ilike(f"%{spoken_loc}%"), MedicalCenter.location.ilike(f"%{spoken_loc}%"))
-                    ).limit(5).all()
+                    matched_centers = []
+                    if spoken_loc:
+                        matched_centers = MedicalCenter.query.filter(
+                            db.or_(MedicalCenter.name.ilike(f"%{spoken_loc}%"), MedicalCenter.location.ilike(f"%{spoken_loc}%"))
+                        ).limit(5).all()
                     if not matched_centers:
                         matched_centers = MedicalCenter.query.limit(3).all()
 
@@ -2126,17 +2131,17 @@ def patient_voice():
                         destination_facility_id=None,
                         companion_user_id=patient.id,
                         pass_hospitals=hosp_names,
-                        pass_location=spoken_loc,
+                        pass_location=spoken_loc or None,
                         patient_name="Emergency Voice Patient",
                         dialect=detected,
-                        statement=f"Location: {spoken_loc} | Audio: {user_text}",
-                        translation=f"Location: {spoken_loc} | Audio: {translated}",
+                        statement=f"Location: {loc_label} | Audio: {user_text}",
+                        translation=f"Location: {loc_label} | Audio: {translated}",
                         triage_tier="RED",
-                        triage_notes=f"Emergency self-referral from {spoken_loc}.",
+                        triage_notes=f"Self-referral via voice companion ({loc_label}).",
                         referral_facility="Open Emergency Pass (Nearby Centers)",
                         referral_code=code,
                         referral_qr=qr_uri,
-                        referral_reason=f"Emergency near {spoken_loc}",
+                        referral_reason=f"Hospital referral requested via voice companion ({loc_label})",
                         referral_status="pending",
                         current_stage="referral",
                         status="active",
