@@ -1763,7 +1763,7 @@ def revoke_companion_referral(user):
 
 # ---- "Cancel my referral" in the patient's own words (Hausa, Pidgin or English) ----
 # Deterministic first, so cancelling is instant and works even when the AI service is slow or down.
-# The AI model also reports `revoke_referral` as a fallback for phrasings these words do not cover.
+# The AI model also reports `referral_action: "cancel"` as a fallback for phrasings these words do not cover.
 _REVOKE_HA = ("soke", "sokar", "sokewa", "janye", "fasa", "goge", "cire", "kashe", "share")
 _REVOKE_EN = {"cancel", "cancelled", "canceled", "revoke", "revoked", "withdraw", "delete", "remove", "erase", "annul"}
 _REVOKE_PCM = {"comot", "scrap"}
@@ -1869,26 +1869,36 @@ HOW TO ANSWER
 
 EMERGENCIES (is_emergency = true)
 Heavy bleeding; bleeding or water breaking in pregnancy; fits or convulsions; hard or noisy breathing; not waking or not responding; chest pain; sudden severe headache with stiff neck or confusion; face drooping, one-sided weakness or slurred speech; snake bite; bad burns; poisoning or swallowing chemicals; a baby who is floppy, will not feed or is very hot; severe dehydration (diarrhoea and vomiting with weakness); thoughts of suicide. Mild or ordinary symptoms are NOT emergencies.
-- In an emergency say plainly to go to the nearest hospital NOW. If the person has not said where they are, finish by asking them to say which town or area they are in so you can find the nearest hospital.
+- In an emergency say plainly to go to the nearest hospital NOW. Then, if they have no code yet, ask if they want a hospital code and which town or area they are in.
 - "spoken_location" is ONLY the place name (town, area or LGA) the person said. Otherwise null.
 
-REFERRAL CODE
-- Set "revoke_referral" to true ONLY when the person clearly asks you to cancel, withdraw or delete their referral or emergency code or pass (for example, the problem is solved or they no longer need it). Asking about it or mentioning it is not enough.
+REFERRAL CODE (hospital pass)
+- You can create and cancel the person's hospital referral code. The context tells you whether they already have an unclaimed code.
+- CREATE: when the person wants to go to a hospital, or you advise it because it is serious, and they have no code, first ask in one short sentence whether they want a hospital code and which town or area they are in. Set "referral_action" to "create" ONLY when BOTH are true: the person agreed (said yes, or answered your question by naming their town or area) AND "spoken_location" holds that place. Otherwise use "none".
+- When you set "create", say in one short sentence that you are getting the code and it will show on their screen. Never say or invent the code itself.
+- If you offered a code in this reply, say so in "answer_english" too, so the next turn knows an offer was made.
+- If they already have a code, never create another. Tell them it is on their screen.
+- CANCEL: set "referral_action" to "cancel" ONLY when the person clearly asks to cancel or no longer needs their code. If you are not sure, ask "Do you want me to cancel your code?" and keep "none".
+- In every other case "referral_action" is "none".
 
 OUTPUT: return ONLY one valid JSON object. No markdown fences, no extra text."""
 
 
-def answer_patient(user_text, translated_text, past_memories, recent_chat, pending_emergency=None, has_pass=False,
+def answer_patient(user_text, translated_text, past_memories, recent_chat, pending_emergency=None, active_pass=None,
                    alt_translation=None):
     pending_active = bool(pending_emergency and pending_emergency.get("active"))
     context = []
     if pending_active:
         context.append(
-            f'ACTIVE EMERGENCY: the person already reported an emergency ("{pending_emergency.get("reason")}") and we are '
-            "waiting for their town or area to prepare a hospital referral. If they now say where they are, put it in "
-            '"spoken_location". If not, answer calmly, remind them it is an emergency, and ask which town or area they are in.')
-    context.append("The person currently HAS an unclaimed referral code." if has_pass
-                   else "The person has no unclaimed referral code.")
+            f'ACTIVE EMERGENCY: the person already reported an emergency ("{pending_emergency.get("reason")}"). '
+            'Check RECENT CONVERSATION. If you already offered a hospital code and they now name their town or area, '
+            'put it in "spoken_location" and set "referral_action" to "create". If you have not offered yet, offer it '
+            'and ask for their town or area. If they refuse a code, accept kindly and tell them again to go to the nearest hospital.')
+    if active_pass:
+        context.append(f'ACTIVE REFERRAL CODE: the person already has an unclaimed code, shown on their screen, valid at: '
+                       f'{active_pass.get("hospitals") or "nearby hospitals"}. Do not create another. Do not say the code aloud.')
+    else:
+        context.append("The person has no unclaimed referral code.")
     context.append(f"PAST CONTEXT (their history):\n{past_memories or 'No past history.'}")
     context.append(f"RECENT CONVERSATION:\n{recent_chat or 'This is the first message.'}")
     context.append(f'ORIGINAL MESSAGE (speech-to-text; decides the reply language):\n"{user_text}"')
@@ -1899,7 +1909,7 @@ def answer_patient(user_text, translated_text, past_memories, recent_chat, pendi
             "Do NOT give health advice, reassurance or a diagnosis yet, and do not pick one for them. Instead ask "
             "ONE short, friendly question, in the language of the ORIGINAL message, that puts both meanings in "
             'simple words so they can say which one they meant. Set "is_emergency" to true only if the ORIGINAL '
-            'message itself clearly describes an emergency. Leave "spoken_location" null and "revoke_referral" false.')
+            'message itself clearly describes an emergency. Leave "spoken_location" null and "referral_action" "none".')
     elif translated_text:
         context.append(f'ENGLISH TRANSLATION (authoritative meaning, already checked; rely on it):\n"{translated_text}"')
 
@@ -1914,7 +1924,7 @@ def answer_patient(user_text, translated_text, past_memories, recent_chat, pendi
   "is_emergency": true or false,
   "emergency_reason": "One short sentence, or null",
   "spoken_location": "Place name only, or null",
-  "revoke_referral": true or false
+  "referral_action": "none" or "create" or "cancel"
 }""".replace("{user_english_line}", user_english_line)
     messages = [
         {"role": "system", "content": COMPANION_SYSTEM_PROMPT},
@@ -1933,7 +1943,7 @@ def answer_patient(user_text, translated_text, past_memories, recent_chat, pendi
             "is_emergency": pending_active,
             "emergency_reason": pending_emergency.get("reason") if pending_active else None,
             "spoken_location": None,
-            "revoke_referral": False,
+            "referral_action": "none",
         }
 
     # Deterministic keyword safety net
@@ -2059,19 +2069,24 @@ def patient_voice():
         memories += [m for m in mem_q.order_by(MemoryIndex.created_at.desc()).limit(2).all() if m.id not in seen]
         long_term = "\n".join(f"Past Context: {m.context_chunk}" for m in memories)
 
-        has_pass = pending_passes(patient).first() is not None
+        # The AI is told about the person's current code, so it knows whether to offer one, point to it, or cancel it.
+        active = pending_passes(patient).first()
+        has_pass = active is not None
         t2 = time.time()
         ai = answer_patient(user_text, translated, long_term, recent_text,
-                            pending_emergency=pending_emergency, has_pass=has_pass, alt_translation=alt_translation)
+                            pending_emergency=pending_emergency,
+                            active_pass=pass_payload(active) if active else None,
+                            alt_translation=alt_translation)
         t3 = time.time()
         translated = str(ai.get("user_english") or translated or user_text)
         if alt_translation:   # keep the doubt on the record so the next turn knows the reading was a guess
             translated = f"(unclear) {translated} OR {alt_translation}"
         detected = str(ai.get("detected_language", "English"))
         lang = reply_lang_code(detected)
+        action = str(ai.get("referral_action") or "none").strip().lower()
 
-        # The model heard a cancel request that the word rules did not catch.
-        if ai.get("revoke_referral") is True and not alt_translation and (has_pass or pending_active):
+        # The AI decided the person wants to cancel (a phrasing the word rules did not catch).
+        if action == "cancel" and not alt_translation and (has_pass or pending_active):
             outcome = revoke_companion_referral(patient)
             save_exchange(patient, user_text, translated, REVOKE_MESSAGES[lang][outcome], REVOKE_MESSAGES["en"][outcome])
             db.session.commit()
@@ -2084,10 +2099,11 @@ def patient_voice():
         save_exchange(patient, user_text, translated, answer_local, answer_en, None if alt_translation else ai.get("keywords"))
         db.session.commit()
 
-        # An open emergency pass is created only for a real emergency, and only ONE unclaimed pass per person.
+        # A pass is created ONLY when the AI asks for one (referral_action = "create") after the person agreed by
+        # voice and gave a place. Still only ONE unclaimed pass per person, and never from an uncertain reading.
         spoken_loc = "" if alt_translation else str(ai.get("spoken_location") or "").strip()[:100]
         auto_referral = None
-        if spoken_loc and (pending_active or ai.get("is_emergency")):
+        if spoken_loc and action == "create":
             try:
                 existing = pending_passes(patient).first()
                 if existing:
