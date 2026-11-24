@@ -30,7 +30,7 @@ html{-webkit-text-size-adjust:100%}
 /* ---------- Mock backend: same URLs, request bodies and response shapes as the Flask templates ----------
    api(url,{json,form,method}) has the same signature as SH.api() in static/app.js, so going live means
    replacing the body of api() with `return SH.api(url,o)`. Routes marked (ASSUMED) were not readable. */
-const {useState,useEffect}=React; const html=htm.bind(React.createElement);
+const {useState,useEffect,useRef}=React; const html=htm.bind(React.createElement);
 const sleep=ms=>new Promise(r=>setTimeout(r,ms)); const NET={off:false};
 const FAC=[{id:1,name:'Murtala Muhammed Specialist Hospital',location:'Kano',short_code:'MU'},{id:2,name:'Aminu Kano Teaching Hospital',location:'Kano',short_code:'AK'}];
 let PTS=[
@@ -73,8 +73,9 @@ const qGet=()=>{try{return JSON.parse(localStorage.getItem('sh_queue')||'[]')}ca
 async function mockApi(url,o={}){
 if(NET.off)throw new Error('No network. This will be sent when your phone is online again.');
 await sleep(url.includes('diagnosis')?1300:600);const [p,qs]=url.split('?');const b=o.json||(o.form&&o.form.entries?Object.fromEntries(o.form.entries()):{});
-if(p==='/api/dashboard')return{stats:{RED:1,YELLOW:2,GREEN:12,incoming:1},incoming:[{referral_code:'AK-7F3K2Q',patient_name:'Hauwa Danjuma',from_facility:'PHC Akinyele',triage_tier:'YELLOW'}],attention:[{patient:PTS[0],triage_tier:'YELLOW',stage:'diagnosis'},{patient:PTS[3],triage_tier:'YELLOW',stage:'referral'}]};
+if(p==='/api/dashboard')return{worker:{name:'Amina Bello',facility:'Murtala Muhammed, Kano'},stats:{RED:1,YELLOW:2,GREEN:12,incoming:1},incoming:[{referral_code:'AK-7F3K2Q',patient_name:'Hauwa Danjuma',from_facility:'PHC Akinyele',triage_tier:'YELLOW'}],attention:[{patient:PTS[0],triage_tier:'YELLOW',stage:'diagnosis'},{patient:PTS[3],triage_tier:'YELLOW',stage:'referral'}]};
 if(p==='/api/centers')return FAC;
+if(p==='/api/phrases')return{ask:[PH[0]],instructions:PH.slice(1),reasons:CHIPS.map(c=>({en:c}))};
 if(p==='/api/patients/check-duplicates')return{matches:[]};
 if(p==='/api/followups')return{questions:FU.map(({ans,...q})=>q)};
 if(p==='/api/followup_answer'){const f=FU.find(x=>x.en===b.question);if(!f)throw new Error('Question not found.');return f.ans}
@@ -109,7 +110,10 @@ print:'<polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2
 loader:'<path d="M21 12a9 9 0 1 1-6.219-8.56"/>'};
 const Icon=({n,c='',s=24})=>html`<svg width=${s} height=${s} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" class=${'shrink-0 '+c} aria-hidden="true" dangerouslySetInnerHTML=${{__html:P[n]}}/>`;
 const K={teal:'bg-teal-700 text-white shadow-md',rose:'bg-rose-600 text-white shadow-md',grey:'bg-slate-200 text-slate-900',link:'text-slate-600 underline underline-offset-4'};
-const Btn=({icon,kind='grey',h='h-14',onClick,children,cls='',right,big,off})=>html`<button onClick=${onClick} disabled=${off} class=${`w-full ${h} px-4 rounded-2xl flex items-center justify-center gap-3 font-bold ${big||'text-lg'} active:scale-[.98] transition disabled:opacity-40 ${K[kind]} ${cls}`}>${icon&&html`<${Icon} n=${icon}/>`}<span>${children}</span>${right&&html`<${Icon} n=${right}/>`}</button>`;
+/* Btn: while its action runs (onClick returns a promise) it shows a spinner, is disabled, and ignores more taps. */
+const Btn=({icon,kind='grey',h='h-14',onClick,children,cls='',right,big,off})=>{const [ld,setLd]=useState(false);
+const click=async e=>{if(ld||off)return;const r=onClick&&onClick(e);if(r&&typeof r.then==='function'){setLd(true);try{await r}catch(x){}finally{setLd(false)}}};
+return html`<button onClick=${click} disabled=${off||ld} aria-busy=${ld} class=${`w-full ${h} px-4 rounded-2xl flex items-center justify-center gap-3 font-bold ${big||'text-lg'} active:scale-[.98] transition disabled:opacity-40 ${ld?'cursor-wait':''} ${K[kind]} ${cls}`}>${ld?html`<${Icon} n="loader" c="spin"/>`:icon&&html`<${Icon} n=${icon}/>`}<span>${children}</span>${!ld&&right&&html`<${Icon} n=${right}/>`}</button>`};
 const TIER={RED:['Red','bg-rose-600 text-white','Go to hospital now'],YELLOW:['Yellow','bg-amber-400 text-slate-900','Needs care soon'],GREEN:['Green','bg-green-600 text-white','Safe to treat here']};
 const Chip=({t})=>html`<span class=${`px-3 py-1 rounded-full font-bold text-base ${TIER[t][1]}`}>${TIER[t][0]}</span>`;
 const SG={triage:'Triage done',diagnosis:'Cause chosen',referral:'Referred',translation:'Intake only',treatment:'Treated here'};
@@ -125,12 +129,13 @@ const [busy,setBusy]=useState(''),[toast,setToast]=useState(''),[dev,setDev]=use
 const [dash,setDash]=useState(null),[cur,setCur]=useState(null),[q,setQ]=useState(''),[res,setRes]=useState([]);
 const [ph,setPh]=useState('idle'),[secs,setSecs]=useState(0),[tr,setTr]=useState(null),[ok,setOk]=useState(false),[skip,setSkip]=useState(false),[mt,setMt]=useState(null),[nw,setNw]=useState(null);
 const [vit,setVit]=useState({}),[tri,setTri]=useState(null),[opts,setOpts]=useState([]),[cause,setCause]=useState(null);
-const [fac,setFac]=useState(FAC),[cid,setCid]=useState(null),[reason,setReason]=useState(''),[ticket,setTicket]=useState(null),[lk,setLk]=useState(''),[lr,setLr]=useState(null),[em,setEm]=useState('');
-const [sym,setSym]=useState(''),[skipV,setSkipV]=useState(false),[ran,setRan]=useState(false),[dx,setDx]=useState(''),[ask,setAsk]=useState(''),[fu,setFu]=useState([]),[fua,setFua]=useState({}),[rq,setRq]=useState(null),[ret,setRet]=useState('act'),[aud,setAud]=useState(null),[voiceV,setVoiceV]=useState({}),[dup,setDup]=useState([]);
+const [fac,setFac]=useState(LIVE?[]:FAC),[cid,setCid]=useState(null),[reason,setReason]=useState(''),[ticket,setTicket]=useState(null),[lk,setLk]=useState(''),[lr,setLr]=useState(null),[em,setEm]=useState('');
+const [sym,setSym]=useState(''),[skipV,setSkipV]=useState(false),[ran,setRan]=useState(false),[dx,setDx]=useState(''),[ask,setAsk]=useState(''),[fu,setFu]=useState([]),[fua,setFua]=useState({}),[rq,setRq]=useState(null),[ret,setRet]=useState('act'),[aud,setAud]=useState(null),[phr,setPhr]=useState({ask:[],instructions:[],reasons:[]}),[voiceV,setVoiceV]=useState({}),[dup,setDup]=useState([]);
 NET.off=off;
 const go=s=>{setSc(s);window.scrollTo(0,0)};
 const say=m=>{setToast(m);setTimeout(()=>setToast(''),2600)};
-const run=async(label,fn)=>{setBusy(label);try{return await fn()}catch(e){say(e.message)}finally{setBusy('')}};
+const busyRef=useRef(false);
+const run=async(label,fn)=>{if(busyRef.current)return;busyRef.current=true;setBusy(label);try{return await fn()}catch(e){say(e.message)}finally{busyRef.current=false;setBusy('')}};
 const play=async text=>{if(off)return say('Voice needs internet');const r=await run('Making voice',()=>api('/api/tts_instruction',{json:{text,language:lang}}));if(r){try{if(!r.audio_url)throw 0;await new Audio(r.audio_url).play()}catch(e){try{speechSynthesis.cancel();speechSynthesis.speak(new SpeechSynthesisUtterance(r.translated_text))}catch(e2){}}}};
 const reset=()=>{setPh('idle');setSecs(0);setTr(null);setOk(false);setSkip(false);setMt(null);setNw(null);setVit({});setTri(null);setOpts([]);setCause(null);setSym('');setSkipV(false);setRan(false);setDx('');setAsk('');setFu([]);setFua({});setRq(null);setAud(null);setVoiceV({});setDup([]);recAbort();setCid(null);setReason('');setTicket(null);setQ('');setRes([])};
 const start=(p,e=null)=>{reset();setPt(p);setEnc(e);go('listen')};
@@ -139,8 +144,10 @@ useEffect(()=>{if(ph!=='rec')return;const t=setInterval(()=>setSecs(s=>s+1),1000
 useEffect(()=>{if(!rq)return;const t=setInterval(()=>setRq(r=>r&&{...r,s:r.s+1}),1000);return()=>clearInterval(t)},[rq&&rq.q]);
 useEffect(()=>{const a=()=>setOff(false),b=()=>setOff(true);window.addEventListener('online',a);window.addEventListener('offline',b);if(!navigator.onLine)setOff(true);return()=>{window.removeEventListener('online',a);window.removeEventListener('offline',b)}},[]);
 useEffect(()=>{if(off)return;(async()=>{const left=[];for(const it of qGet()){try{await api(it.url,{json:it.json})}catch(e){left.push(it)}}qSet(left);setQueued(left.length)})()},[off]);
+useEffect(()=>{api('/api/phrases').then(setPhr).catch(()=>{})},[]);
+useEffect(()=>{if(sc==='find')search('')},[sc]);
 useEffect(()=>{if(sc==='refer'||sc==='emerg')api('/api/centers').then(setFac).catch(()=>{})},[sc]);
-const search=async v=>{setQ(v);if(!v.trim()){setRes([]);return}try{setRes(await api('/api/patients?q='+encodeURIComponent(v)))}catch(e){}};
+const search=async v=>{setQ(v);try{setRes(await api('/api/patients?q='+encodeURIComponent(v.trim())))}catch(e){}};
 const pick=async p=>{setPt(p);if(enc)api(`/api/encounter/${enc}/patient`,{json:{patient_id:p.id}}).catch(()=>{})};
 const vset={};for(const [k] of VS)if(vit[k]!=null)vset[k]=vit[k];const vn=Object.keys(vset).length;
 const [lt,tr2]=vn&&!skipV?rule(vset):[null,[]];
@@ -178,7 +185,7 @@ let b;
 
 if(sc==='home'){const S=dash?dash.stats:{RED:0,YELLOW:0,GREEN:0};b=html`<div>
 <header class="px-5 py-4 bg-white shadow-sm flex items-center gap-3"><div class="w-12 h-12 rounded-2xl bg-teal-700 text-white flex items-center justify-center"><${Icon} n="pulse" s=${28}/></div>
-<div class="flex-1"><div class="font-bold leading-tight">Hello, ${dash&&dash.worker?dash.worker.name:'Amina'}</div><div class="text-base text-slate-700">${dash&&dash.worker?dash.worker.facility:'Murtala Muhammed, Kano'}</div></div>
+<div class="flex-1"><div class="font-bold leading-tight">Hello${dash&&dash.worker?', '+dash.worker.name:''}</div><div class="text-base text-slate-700">${dash&&dash.worker?dash.worker.facility:''}</div></div>
 <button onClick=${()=>setOff(!off)} class=${`h-14 px-3 rounded-2xl flex items-center gap-2 font-bold ${off?'bg-slate-900 text-white':'text-green-700'}`}><${Icon} n="wifi"/><span>${off?'Offline':'Online'}</span></button></header><${Off}/>
 <div class="p-4 sm:p-5 lg:p-8 space-y-4">
 ${dev&&html`<div class="text-base font-mono bg-slate-100 rounded-lg px-2 py-1">GET /api/dashboard (ASSUMED JSON twin of /dashboard stats + incoming)</div>`}
@@ -198,7 +205,7 @@ ${LIVE&&html`<${Btn} kind="link" icon="home" onClick=${()=>{location.href='/logo
 
 if(sc==='find') b=html`<div><${Top} title="Find Patient" back="home" a="GET /api/patients?q=  (name, phone or hospital ID; 8 recent when empty)"/><div class="p-4 sm:p-5 lg:p-8 space-y-3">
 <label class="h-16 bg-slate-200 rounded-2xl flex items-center gap-3 px-4"><${Icon} n="search"/><input value=${q} onInput=${e=>search(e.target.value)} placeholder="Type a name or phone" class="flex-1 h-full bg-transparent outline-none placeholder-slate-600"/></label>
-<div class="cols space-y-3">${(q?res:PTS.slice(0,8)).map(p=>html`<${PRow} key=${p.id} p=${p} onClick=${async()=>{const d=await run('Opening',()=>api('/api/patients/'+p.id));if(d){setCur(d);go('detail')}}}/>`)}</div>
+<div class="cols space-y-3">${res.map(p=>html`<${PRow} key=${p.id} p=${p} onClick=${async()=>{const d=await run('Opening',()=>api('/api/patients/'+p.id));if(d){setCur(d);go('detail')}}}/>`)}</div>
 ${q&&!res.length&&html`<p class="text-center py-4 text-slate-700">No patient found.</p>`}
 </div></div>`;
 
@@ -223,7 +230,7 @@ ${pt&&html`<div class="bg-white rounded-2xl p-4 shadow-sm flex items-center gap-
 <div class="bg-white rounded-2xl shadow-sm p-3 space-y-3"><label class="font-bold block">Ask the patient</label>
 <textarea value=${ask} onInput=${e=>setAsk(e.target.value)} rows="2" placeholder="Type what you want to ask, in English" class="w-full p-4 rounded-2xl bg-slate-200 outline-none placeholder-slate-600"/>
 <${Btn} kind="teal" icon="play" off=${!ask.trim()} onClick=${()=>play(ask.trim())}>Play in ${LN[lang]}<//>
-<${Btn} icon="volume" onClick=${()=>play(PH[0].en)}>Quick ask: "What brings you here?"<//></div>
+${phr.ask.map(x=>html`<${Btn} key=${x.en} icon="volume" onClick=${()=>play(x.en)}>Quick ask: ${x.en}<//>`)}</div>
 ${ph==='idle'&&html`<${Btn} kind="teal" h="h-24" icon="mic" big="text-xl" off=${off} onClick=${tapRec}>Tap to Record<//>`}
 ${ph==='rec'&&html`<button onClick=${tapRec} class="w-full h-24 rounded-3xl bg-rose-600 text-white shadow-md flex items-center justify-center gap-3 font-bold text-xl rec"><${Icon} n="stop" s=${30}/><span>Stop ${String(Math.floor(secs/60)).padStart(2,'0')}:${String(secs%60).padStart(2,'0')}</span></button>`}
 ${ph==='ready'&&html`<div class="space-y-3"><div class="bg-teal-50 border border-teal-200 rounded-2xl p-4 flex items-center gap-3 font-bold"><${Icon} n="check" c="text-teal-700"/>Recording saved (${secs}s)</div>
@@ -287,7 +294,7 @@ ${g?[treat,refer]:[refer,treat]}</div></div>`}
 
 if(sc==='treat') b=html`<div><${Top} title="Tell the Patient" back="act" a="POST /api/tts_instruction {text ≤500, language: en|ha|pcm} → {audio_url, translated_text}"/><${Off}/>
 <div class="p-4 sm:p-5 lg:p-8 space-y-3"><${Allergy}/><${Lang}/>
-<div class="cols space-y-3">${PH.slice(1).map(x=>html`<${Btn} key=${x.en} icon="volume" h="min-h-[64px] py-2" onClick=${()=>play(x.en)}>${x.en}<//>`)}</div>
+<div class="cols space-y-3">${phr.instructions.map(x=>html`<${Btn} key=${x.en} icon="volume" h="min-h-[64px] py-2" onClick=${()=>play(x.en)}>${x.en}<//>`)}</div>
 ${Who()}<${Btn} kind="teal" h="h-16" icon="check" onClick=${()=>finish('treatment')}>Save & Done<//></div></div>`;
 
 if(sc==='refer'||sc==='emerg'){const E=sc==='emerg';
@@ -302,7 +309,7 @@ ${(E||!pt)&&html`<label class="h-16 bg-slate-200 rounded-2xl flex items-center g
 <${Allergy}/><h2 class="text-xl font-bold">Choose hospital</h2>
 <div class="cols space-y-3">${fac.map(f=>html`<button key=${f.id} onClick=${()=>setCid(f.id)} class=${`w-full min-h-[68px] rounded-2xl px-4 py-3 flex items-center gap-3 text-left font-bold ${cid===f.id?'bg-white ring-4 ring-teal-700 shadow-md':'bg-slate-200'}`}><${Icon} n=${cid===f.id?'check':'hospital'}/><span class="flex-1">${f.name}<span class="block font-normal text-base text-slate-700">${f.location}</span></span></button>`)}</div>
 <h2 class="text-xl font-bold">Why? Tap all that apply</h2>
-<div class="grid grid-cols-2 gap-2">${CHIPS.map(c=>html`<button key=${c} onClick=${()=>setReason(r=>r.includes(c)?r:(r?r+'; ':'')+c)} class=${`min-h-14 px-2 rounded-2xl font-bold flex items-center justify-center gap-2 ${reason.includes(c)?'bg-slate-900 text-white':'bg-slate-200'}`}>${reason.includes(c)&&html`<${Icon} n="check" s=${18}/>`}${c}</button>`)}</div>
+<div class="grid grid-cols-2 gap-2">${phr.reasons.map(x=>x.en).map(c=>html`<button key=${c} onClick=${()=>setReason(r=>r.includes(c)?r:(r?r+'; ':'')+c)} class=${`min-h-14 px-2 rounded-2xl font-bold flex items-center justify-center gap-2 ${reason.includes(c)?'bg-slate-900 text-white':'bg-slate-200'}`}>${reason.includes(c)&&html`<${Icon} n="check" s=${18}/>`}${c}</button>`)}</div>
 <textarea value=${reason} onInput=${e=>setReason(e.target.value)} rows="2" placeholder="Reason" class="w-full p-4 rounded-2xl bg-slate-200 outline-none placeholder-slate-600"/>
 <${Btn} kind=${E||(tri&&tri.tier==='RED')?'rose':'teal'} h="h-20" icon="qr" big="text-xl" onClick=${go2}>Make Referral Code<//>
 </div></div>`}
@@ -324,6 +331,7 @@ ${lr&&html`<div class="bg-white rounded-3xl shadow-md p-5 space-y-3"><div class=
 </div></div>`}
 
 return html`<main class="w-full max-w-md sm:max-w-2xl lg:max-w-4xl mx-auto bg-white min-h-[100dvh] shadow-xl"><div class="bg-slate-50 min-h-[100dvh] pb-10">${b}</div>
+${busy&&html`<div class="noprint fixed inset-0 z-20 cursor-wait" aria-hidden="true"/>`}
 ${busy&&html`<div class="noprint fixed top-4 left-1/2 -translate-x-1/2 bg-slate-900 text-white rounded-2xl px-5 py-3 shadow-md font-bold flex items-center gap-3 z-30"><${Icon} n="loader" c="spin"/><span>${busy}</span></div>`}
 ${toast&&html`<div class="noprint fixed bottom-6 left-4 right-4 max-w-md mx-auto bg-slate-900 text-white rounded-2xl px-5 py-4 shadow-md font-bold flex items-center gap-2 z-30"><${Icon} n="alert"/><span>${toast}</span></div>`}</main>`;
 }
