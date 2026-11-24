@@ -5,6 +5,10 @@ Flow of a patient encounter:
 
 Pipeline for intake:
     Whisper (Groq) transcribes  ->  Gemini translates  ->  LiteLLM analyzes (TC / vitals / dialect)
+
+v4 CHW single-page app (templates/chw_app.html, served at /chw-app) talks to these routes. Every stage can run on
+its own: triage and diagnosis work without a patient (nothing is stored), and /api/save_encounter writes any
+stage, or the whole visit, to a patient's record when the worker is done.
 """
 import base64
 import hmac
@@ -317,7 +321,10 @@ _llm = None
 
 # ---- Gemini (direct SDK): the translator ----
 _GEMINI_KEY = os.getenv("GEMINI_API_KEY")
-gemini_model = "gemini-2.5-flash"
+# FIX: this used to start as the string "gemini-2.5-flash". With no key (or no SDK) it stayed a string, so
+# `gemini_model is None` was never true and every translation tried "str".generate_content() and logged an error
+# before falling back. None now means "Gemini unavailable" exactly as the callers expect.
+gemini_model = None
 _GEMINI_SAFETY = None
 if not _GEMINI_KEY:
     logger.warning("GEMINI_API_KEY is NOT set. Translation will fall back to the LiteLLM model.")
@@ -956,6 +963,13 @@ def lookup_page():
     return render_template("lookup.html")
 
 
+@app.route("/chw-app")
+@login_required
+def chw_app():
+    """The v4 single-page CHW app (templates/chw_app.html). It reads its CSRF token from a <meta> tag."""
+    return render_template("chw_app.html")
+
+
 @app.route("/patient")
 def patient_portal():
     return render_template("patient.html")
@@ -1031,6 +1045,44 @@ def dashboard():
 # ==========================================
 # 7. CLINICAL API ROUTES
 # ==========================================
+@app.route("/api/dashboard")
+@login_required
+def api_dashboard():
+    """JSON twin of /dashboard for the v4 home screen: tier counts, referrals coming in, patients needing attention."""
+    facility_id = session["facility_id"]
+    scope = db.and_(Encounter.facility_id == facility_id,
+                    db.or_(Encounter.referral_status.is_(None), Encounter.referral_status != "revoked"))
+    counts = dict(db.session.query(Encounter.triage_tier, func.count()).filter(scope).group_by(Encounter.triage_tier).all())
+    incoming_q = Encounter.query.filter_by(destination_facility_id=facility_id, referral_status="pending")
+
+    incoming = []
+    for e in incoming_q.order_by(Encounter.updated_at.desc()).limit(15).all():
+        origin = db.session.get(MedicalCenter, e.origin_facility_id or e.facility_id) if (e.origin_facility_id or e.facility_id) else None
+        incoming.append({"referral_code": e.referral_code, "patient_name": e.patient_name,
+                         "from_facility": origin.name if origin else "Patient Self-Referral (Companion)",
+                         "triage_tier": e.triage_tier or "YELLOW"})
+
+    attention, seen = [], set()
+    rows = (Encounter.query.filter(scope, Encounter.triage_tier.in_(("RED", "YELLOW")), Encounter.patient_id.isnot(None))
+            .order_by(Encounter.created_at.desc()).limit(40).all())
+    for e in rows:
+        if e.patient_id in seen or not e.patient or not e.patient.is_active:
+            continue
+        seen.add(e.patient_id)
+        attention.append({"patient": e.patient.to_dict(), "triage_tier": e.triage_tier,
+                          "stage": "treatment" if e.status == "treated" else e.current_stage})
+        if len(attention) >= 6:
+            break
+
+    return jsonify({
+        "worker": {"name": session.get("worker_name"), "facility": session.get("facility_name")},
+        "stats": {"RED": counts.get("RED", 0), "YELLOW": counts.get("YELLOW", 0), "GREEN": counts.get("GREEN", 0),
+                  "incoming": incoming_q.count()},
+        "incoming": incoming,
+        "attention": attention,
+    })
+
+
 @app.route("/api/centers")
 @login_required
 def get_centers():
@@ -1126,7 +1178,8 @@ def get_patient(patient_id):
                .order_by(Encounter.created_at.desc()).limit(20).all())
     return jsonify({**patient.to_dict(), "encounters": [{
         "id": e.id, "date": e.created_at.strftime("%d %b %Y, %I:%M %p"), "triage_tier": e.triage_tier,
-        "stage": e.current_stage, "diagnosis": e.diagnosis_notes, "referral_code": e.referral_code,
+        "stage": "treatment" if e.status == "treated" else e.current_stage,
+        "diagnosis": e.diagnosis_notes, "referral_code": e.referral_code,
     } for e in history]})
 
 
@@ -1394,6 +1447,133 @@ def save_intake():
     })
 
 
+@app.route("/api/followups", methods=["POST"])
+@login_required
+def api_followups():
+    """2 to 4 short follow-up questions that dig deeper into what the patient just said (v4 Listen page).
+    Each comes with a Hausa and a Pidgin version so the worker can play it to the patient. Fails soft: an empty
+    list just hides the follow-up section."""
+    data = request.get_json(silent=True) or {}
+    translation = (data.get("translation") or "").strip()[:1500]
+    if not translation:
+        return jsonify({"questions": []})
+
+    prompt = f"""You are an experienced clinical interviewer helping a community health worker in Nigeria.
+    The patient said (already translated to English): "{translation}"
+    Write exactly 3 short, simple follow-up questions that ask for MORE DETAIL about what the patient already
+    reported (for example since when, where exactly, how bad, what makes it better or worse). Do not ask about
+    symptoms the patient did not mention. Do not ask for vitals. Plain everyday words, one sentence each.
+    Give each question in English, in simple spoken Hausa, and in Nigerian Pidgin.
+    Return ONLY valid JSON, no markdown:
+    {{"questions": [{{"en": "...", "ha": "...", "pcm": "..."}}]}}"""
+    try:
+        result = llm_json(prompt, 0.3)
+        questions = []
+        for q in result.get("questions") or []:
+            if isinstance(q, dict) and str(q.get("en") or "").strip():
+                questions.append({k: str(q.get(k) or "").strip()[:300] for k in ("en", "ha", "pcm")})
+        return jsonify({"questions": questions[:4]})
+    except Exception:
+        logger.exception("Follow-up question generation failed")
+        return jsonify({"questions": []})
+
+
+@app.route("/api/followup_answer", methods=["POST"])
+@login_required
+def api_followup_answer():
+    """Transcribe and translate the patient's spoken answer to ONE follow-up question (multipart: audio, language,
+    question). Nothing is stored here; the page adds the English line to the translation and /api/save_encounter
+    writes the combined text when the worker saves."""
+    audio_file = request.files.get("audio")
+    if not audio_file:
+        return fail("No audio file provided.", 400)
+    lang = STT_LANGS.get((request.form.get("language") or "").lower())
+
+    try:
+        raw_text = transcribe(audio_file, lang, STT_PROMPT_CLINIC)
+    except ValueError as e:
+        return fail(str(e), 400)
+    except Exception as e:
+        if getattr(e, "status_code", None) == 429:
+            return fail("The speech service is busy. Wait a moment and try again.", 429, e)
+        return fail("Could not transcribe the audio. Check connection and try again.", 502, e)
+
+    translation = gemini_translate(raw_text, "English", lang)
+    if not translation:
+        try:
+            translation = llm_text([
+                {"role": "system", "content": "Translate the patient's short answer to clear English. It may be Hausa, Nigerian Pidgin or English. Return ONLY the translation, no quotes. Add nothing that was not said."},
+                {"role": "user", "content": raw_text},
+            ], 0.1, max_tokens=300)
+        except Exception:
+            logger.exception("Follow-up answer translation failed; using the transcript")
+    return jsonify({"statement": raw_text, "translation": translation or raw_text})
+
+
+@app.route("/api/save_encounter", methods=["POST"])
+@login_required
+def save_encounter():
+    """Save whatever the worker has done so far (any stage, or the whole visit) to ONE patient's record.
+
+    Creates the encounter if there is none yet, otherwise updates it, so calling it twice never duplicates a visit.
+    stage: translation | diagnosis | treatment ('treatment' = treated here, no referral)."""
+    data = request.get_json(silent=True) or {}
+    patient = get_facility_patient(data.get("patient_id"))
+    if not patient:
+        return fail("Choose or create a patient first.", 400)
+    enc = get_facility_encounter(data.get("encounter_id")) if data.get("encounter_id") else None
+    if data.get("encounter_id") and not enc:
+        return fail("Encounter not found.", 404)
+    stage = str(data.get("stage") or "translation").lower()
+
+    enc = enc or new_encounter(patient)
+    attach_patient(enc, patient)
+
+    translation = str(data.get("translation") or "").strip()[:5000]
+    statement = str(data.get("statement") or "").strip()[:5000]
+    symptoms = str(data.get("symptoms") or "").strip()[:2000]
+    if translation:
+        enc.translation = translation
+    if statement:
+        enc.statement = statement
+    elif symptoms and not enc.statement:
+        enc.statement = symptoms
+    if data.get("dialect"):
+        enc.dialect = str(data["dialect"])[:50]
+    if data.get("conclusion") or data.get("tc_actions"):
+        enc.tc_steps_translation = json.dumps({
+            "conclusion": data.get("conclusion"),
+            "summary": data.get("tc_summary") or "Unconfirmed",
+            "actions": data.get("tc_actions") or [],
+        })
+
+    vitals = {}
+    for key, (low, high) in VITAL_LIMITS.items():
+        v = to_float((data.get("vitals") or {}).get(key))
+        if v is not None and low <= v <= high:
+            vitals[key] = v
+    if vitals:
+        merge_vitals(enc, vitals)
+
+    tier = str(data.get("tier") or "").upper()
+    if tier in ("RED", "YELLOW", "GREEN"):
+        enc.triage_tier = tier
+        if vitals:
+            enc.triage_notes = compute_triage(json.loads(enc.vitals_json))[2]
+        advance_stage(enc, "triage")
+
+    diagnosis_text = str(data.get("diagnosis") or "").strip()[:500]
+    if diagnosis_text:
+        enc.diagnosis_notes = diagnosis_text
+        enc.diagnosis_medications = str(data.get("medications") or "").strip()[:1000] or enc.diagnosis_medications
+        advance_stage(enc, "diagnosis")
+    if stage == "treatment" and enc.status != "referred":
+        enc.status = "treated"
+
+    db.session.commit()
+    return jsonify({"status": "saved", "encounter_id": enc.id, "patient_id": patient.id, "patient_name": patient.full_name})
+
+
 @app.route("/api/tts_instruction", methods=["POST"])
 @login_required
 def tts_instruction():
@@ -1435,9 +1615,7 @@ def api_triage():
     enc = get_facility_encounter(data.get("encounter_id")) if data.get("encounter_id") else None
     if data.get("encounter_id") and not enc:
         return fail("Encounter not found.", 404)
-    patient = resolve_patient(data, enc)
-    if not patient:
-        return fail("Choose or create a patient first.", 400)
+    patient = resolve_patient(data, enc)   # optional: with no patient the tier is worked out but nothing is stored
 
     vitals = {k: to_float(data.get(k)) for k in VITAL_LIMITS}
     if all(v is None for v in vitals.values()):
@@ -1450,17 +1628,22 @@ def api_triage():
         return fail("Systolic BP must be higher than diastolic BP.", 400)
 
     tier, triggers, notes = compute_triage(vitals)
+    triage_data = {"tier": tier, "trigger": "; ".join(triggers), "notes": notes}
+
+    if not patient and not enc:
+        return jsonify({"encounter_id": None, "patient": None, "triage_data": triage_data})
 
     enc = enc or new_encounter(patient)
-    attach_patient(enc, patient)
+    if patient:
+        attach_patient(enc, patient)
     merge_vitals(enc, vitals)
     enc.triage_tier, enc.triage_notes = tier, notes
     enc.tc_steps_triage = json.dumps({"triggers": triggers})
     advance_stage(enc, "triage")
     db.session.commit()
 
-    return jsonify({"encounter_id": enc.id, "patient": patient.to_dict(),
-                    "triage_data": {"tier": tier, "trigger": "; ".join(triggers), "notes": notes}})
+    return jsonify({"encounter_id": enc.id, "patient": patient.to_dict() if patient else None,
+                    "triage_data": triage_data})
 
 
 @app.route("/api/diagnosis", methods=["POST"])
@@ -1484,9 +1667,7 @@ def api_diagnosis():
     enc = get_facility_encounter(data.get("encounter_id")) if data.get("encounter_id") else None
     if data.get("encounter_id") and not enc:
         return fail("Encounter not found.", 404)
-    patient = resolve_patient(data, enc)
-    if not patient:
-        return fail("Choose or create a patient first.", 400)
+    patient = resolve_patient(data, enc)   # optional: with no patient the causes are suggested but nothing is stored
     symptoms = (data.get("symptoms") or "").strip()[:2000]
     if not symptoms:
         return fail("Describe the symptoms first.", 400)
@@ -1494,10 +1675,11 @@ def api_diagnosis():
     vitals = {k: to_float(data.get(k)) for k in VITAL_LIMITS}
     vitals_text = ", ".join(f"{k}: {v:g}" for k, v in vitals.items() if v is not None) or "not recorded"
     extra = []
-    if patient.age_years is not None: extra.append(f"age {patient.age_years}")
-    if patient.sex: extra.append("female" if patient.sex == "F" else "male")
-    if patient.is_pregnant: extra.append("pregnant")
-    if patient.allergies: extra.append(f"allergies: {patient.allergies}")
+    if patient:
+        if patient.age_years is not None: extra.append(f"age {patient.age_years}")
+        if patient.sex: extra.append("female" if patient.sex == "F" else "male")
+        if patient.is_pregnant: extra.append("pregnant")
+        if patient.allergies: extra.append(f"allergies: {patient.allergies}")
     context = ("Patient: " + ", ".join(extra)) if extra else "Patient details: not recorded"
     prompt = f"""
     You are a clinical decision-support assistant for a community health worker in Nigeria.
@@ -1505,32 +1687,51 @@ def api_diagnosis():
     Patient symptoms: "{symptoms}"
     Vitals: {vitals_text}
     Suggest the 3 to 5 most likely diagnoses, most likely first. Consider diseases common in Nigeria.
+    For each one give: a short reason matching the symptoms, simple first-line care a community health worker can
+    give or arrange (no drug doses; respect any allergy above), and whether hospital admission or referral is needed.
     Return ONLY valid JSON:
     {{
       "reasoning": "2 to 4 plain sentences explaining the pattern",
-      "options": ["Diagnosis 1", "Diagnosis 2", "Diagnosis 3"],
+      "options": [
+        {{"name": "Diagnosis 1", "why": "Brief reason", "meds": "Simple treatment", "adm": "Hospital needed? When?"}}
+      ],
       "source_reference": "Clinical source or guideline"
     }}
     """
     try:
         result = llm_json(prompt, 0.2)
-        options = [str(o).strip()[:120] for o in result.get("options", []) if str(o).strip()][:5]
+        details = []
+        for o in result.get("options", []):
+            if isinstance(o, dict):
+                name = str(o.get("name") or "").strip()[:120]
+                entry = {"name": name, "why": str(o.get("why") or "").strip()[:300],
+                         "meds": str(o.get("meds") or "").strip()[:300], "adm": str(o.get("adm") or "").strip()[:300]}
+            else:
+                name = str(o).strip()[:120]
+                entry = {"name": name, "why": "", "meds": "", "adm": ""}
+            if name:
+                details.append(entry)
+        details = details[:5]
+        options = [d["name"] for d in details]
         if not options:
             raise ValueError("No options returned")
     except Exception as e:
         return fail("Could not analyse the symptoms. Try again.", 502, e)
 
-    enc = enc or new_encounter(patient)
-    attach_patient(enc, patient)
-    enc.statement = enc.statement or symptoms
-    merge_vitals(enc, vitals)
     reasoning = str(result.get("reasoning") or "")
     source = str(result.get("source_reference") or "Unknown")
-    enc.tc_steps_diagnosis = json.dumps({"options": options, "reasoning": reasoning, "source": source})
-    advance_stage(enc, "diagnosis")
-    db.session.commit()
+    enc = enc or (new_encounter(patient) if patient else None)
+    if enc:
+        if patient:
+            attach_patient(enc, patient)
+        enc.statement = enc.statement or symptoms
+        merge_vitals(enc, vitals)
+        enc.tc_steps_diagnosis = json.dumps({"options": options, "details": details, "reasoning": reasoning, "source": source})
+        advance_stage(enc, "diagnosis")
+        db.session.commit()
 
-    return jsonify({"encounter_id": enc.id, "options": options, "reasoning": reasoning, "source_reference": source})
+    return jsonify({"encounter_id": enc.id if enc else None, "options": options, "details": details,
+                    "reasoning": reasoning, "source_reference": source})
 
 
 @app.route("/api/referral", methods=["POST"])
