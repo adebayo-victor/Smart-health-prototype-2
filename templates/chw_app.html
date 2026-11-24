@@ -21,6 +21,11 @@ html{-webkit-text-size-adjust:100%}
 @media(max-width:359px){body{font-size:16px}}
 @media(min-width:1024px){body{font-size:19px}.cols{display:grid;grid-template-columns:1fr 1fr;gap:1rem;align-items:start}.cols>*{margin:0!important}}
 @media(min-width:640px){body{padding:1rem 0}}
+button[data-ld]{position:relative;pointer-events:none;cursor:wait}
+button[data-ld]::after{content:"";position:absolute;right:14px;top:50%;margin-top:-10px;width:20px;height:20px;border:3px solid currentColor;border-right-color:transparent;border-radius:50%;animation:sp .8s linear infinite}
+button[data-ld][aria-busy="true"]::after{display:none}
+button.w-12[data-ld] svg{opacity:0}
+button.w-12[data-ld]::after{right:auto;left:50%;margin-left:-10px}
 @media print{.noprint{display:none!important}}
 </style>
 </head>
@@ -68,6 +73,12 @@ async function recStart(){if(!LIVE)return;const st=await navigator.mediaDevices.
 function recStop(){return new Promise(res=>{const mr=REC.mr;if(!LIVE||!mr)return res(null);mr.onstop=()=>{if(REC.st)REC.st.getTracks().forEach(t=>t.stop());REC.mr=null;res(new Blob(REC.ch,{type:mr.mimeType||'audio/webm'}))};mr.stop()})}
 function recAbort(){try{if(REC.mr&&REC.mr.state!=='inactive')REC.mr.stop();if(REC.st)REC.st.getTracks().forEach(t=>t.stop())}catch(e){}REC.mr=null}
 const audioForm=(blob,extra)=>{const f=new FormData();if(blob){const t=blob.type||'';f.append('audio',blob,'recording.'+(t.includes('mp4')?'m4a':t.includes('ogg')?'ogg':'webm'))}for(const k in extra)f.append(k,extra[k]);return f};
+/* Every <button> in the app gets a spinner after a tap and ignores taps while it spins (at least 0.4 s, and until
+   any running request finishes). Btn buttons with an async action show their own spinner icon instead. */
+document.addEventListener('click',e=>{const b=e.target.closest&&e.target.closest('button');if(!b)return;
+if(b.hasAttribute('data-ld')){e.preventDefault();e.stopPropagation();return}
+if(b.disabled)return;b.setAttribute('data-ld','1');const t0=Date.now();
+const done=()=>{if(Date.now()-t0<400||window.__busy)return setTimeout(done,100);b.removeAttribute('data-ld')};setTimeout(done,100)},true);
 const normOpts=d=>d.details&&d.details.length?d.details:(d.options||[]).map(o=>typeof o==='string'?{name:o,why:d.reasoning||'',meds:'',adm:''}:o);
 const qGet=()=>{try{return JSON.parse(localStorage.getItem('sh_queue')||'[]')}catch(e){return[]}};const qSet=a=>{try{localStorage.setItem('sh_queue',JSON.stringify(a))}catch(e){}};
 async function mockApi(url,o={}){
@@ -135,7 +146,7 @@ NET.off=off;
 const go=s=>{setSc(s);window.scrollTo(0,0)};
 const say=m=>{setToast(m);setTimeout(()=>setToast(''),2600)};
 const busyRef=useRef(false);
-const run=async(label,fn)=>{if(busyRef.current)return;busyRef.current=true;setBusy(label);try{return await fn()}catch(e){say(e.message)}finally{busyRef.current=false;setBusy('')}};
+const run=async(label,fn)=>{if(busyRef.current)return;busyRef.current=true;window.__busy=true;setBusy(label);try{return await fn()}catch(e){say(e.message)}finally{busyRef.current=false;window.__busy=false;setBusy('')}};
 const play=async text=>{if(off)return say('Voice needs internet');const r=await run('Making voice',()=>api('/api/tts_instruction',{json:{text,language:lang}}));if(r){try{if(!r.audio_url)throw 0;await new Audio(r.audio_url).play()}catch(e){try{speechSynthesis.cancel();speechSynthesis.speak(new SpeechSynthesisUtterance(r.translated_text))}catch(e2){}}}};
 const reset=()=>{setPh('idle');setSecs(0);setTr(null);setOk(false);setSkip(false);setMt(null);setNw(null);setVit({});setTri(null);setOpts([]);setCause(null);setSym('');setSkipV(false);setRan(false);setDx('');setAsk('');setFu([]);setFua({});setRq(null);setAud(null);setVoiceV({});setDup([]);recAbort();setCid(null);setReason('');setTicket(null);setQ('');setRes([])};
 const start=(p,e=null)=>{reset();setPt(p);setEnc(e);go('listen')};
