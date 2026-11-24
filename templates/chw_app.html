@@ -141,14 +141,14 @@ const [dash,setDash]=useState(null),[cur,setCur]=useState(null),[q,setQ]=useStat
 const [ph,setPh]=useState('idle'),[secs,setSecs]=useState(0),[tr,setTr]=useState(null),[ok,setOk]=useState(false),[skip,setSkip]=useState(false),[mt,setMt]=useState(null),[nw,setNw]=useState(null);
 const [vit,setVit]=useState({}),[tri,setTri]=useState(null),[opts,setOpts]=useState([]),[cause,setCause]=useState(null);
 const [fac,setFac]=useState(LIVE?[]:FAC),[cid,setCid]=useState(null),[reason,setReason]=useState(''),[ticket,setTicket]=useState(null),[lk,setLk]=useState(''),[lr,setLr]=useState(null),[em,setEm]=useState('');
-const [sym,setSym]=useState(''),[skipV,setSkipV]=useState(false),[ran,setRan]=useState(false),[dx,setDx]=useState(''),[ask,setAsk]=useState(''),[fu,setFu]=useState([]),[fua,setFua]=useState({}),[rq,setRq]=useState(null),[ret,setRet]=useState('act'),[aud,setAud]=useState(null),[phr,setPhr]=useState({ask:[],instructions:[],reasons:[]}),[voiceV,setVoiceV]=useState({}),[dup,setDup]=useState([]);
+const [sym,setSym]=useState(''),[skipV,setSkipV]=useState(false),[ran,setRan]=useState(false),[dx,setDx]=useState(''),[ask,setAsk]=useState(''),[fu,setFu]=useState([]),[fua,setFua]=useState({}),[rq,setRq]=useState(null),[ret,setRet]=useState('act'),[aud,setAud]=useState(null),[tx,setTx]=useState(''),[phr,setPhr]=useState({ask:[],instructions:[],reasons:[]}),[voiceV,setVoiceV]=useState({}),[dup,setDup]=useState([]);
 NET.off=off;
 const go=s=>{setSc(s);window.scrollTo(0,0)};
 const say=m=>{setToast(m);setTimeout(()=>setToast(''),2600)};
 const busyRef=useRef(false);
 const run=async(label,fn)=>{if(busyRef.current)return;busyRef.current=true;window.__busy=true;setBusy(label);try{return await fn()}catch(e){say(e.message)}finally{busyRef.current=false;window.__busy=false;setBusy('')}};
 const play=async text=>{if(off)return say('Voice needs internet');const r=await run('Making voice',()=>api('/api/tts_instruction',{json:{text,language:lang}}));if(r){try{if(!r.audio_url)throw 0;await new Audio(r.audio_url).play()}catch(e){try{speechSynthesis.cancel();speechSynthesis.speak(new SpeechSynthesisUtterance(r.translated_text))}catch(e2){}}}};
-const reset=()=>{setPh('idle');setSecs(0);setTr(null);setOk(false);setSkip(false);setMt(null);setNw(null);setVit({});setTri(null);setOpts([]);setCause(null);setSym('');setSkipV(false);setRan(false);setDx('');setAsk('');setFu([]);setFua({});setRq(null);setAud(null);setVoiceV({});setDup([]);recAbort();setCid(null);setReason('');setTicket(null);setQ('');setRes([])};
+const reset=()=>{setPh('idle');setSecs(0);setTr(null);setOk(false);setSkip(false);setMt(null);setNw(null);setVit({});setTri(null);setOpts([]);setCause(null);setSym('');setSkipV(false);setRan(false);setDx('');setAsk('');setFu([]);setFua({});setRq(null);setAud(null);setTx('');setVoiceV({});setDup([]);recAbort();setCid(null);setReason('');setTicket(null);setQ('');setRes([])};
 const start=(p,e=null)=>{reset();setPt(p);setEnc(e);go('listen')};
 useEffect(()=>{if(sc==='home')api('/api/dashboard').then(setDash).catch(()=>{});},[sc,off]);
 useEffect(()=>{if(ph!=='rec')return;const t=setInterval(()=>setSecs(s=>s+1),1000);return()=>clearInterval(t)},[ph]);
@@ -306,6 +306,9 @@ ${g?[treat,refer]:[refer,treat]}</div></div>`}
 if(sc==='treat') b=html`<div><${Top} title="Tell the Patient" back="act" a="POST /api/tts_instruction {text ≤500, language: en|ha|pcm} → {audio_url, translated_text}"/><${Off}/>
 <div class="p-4 sm:p-5 lg:p-8 space-y-3"><${Allergy}/><${Lang}/>
 <div class="cols space-y-3">${phr.instructions.map(x=>html`<${Btn} key=${x.en} icon="volume" h="min-h-[64px] py-2" onClick=${()=>play(x.en)}>${x.en}<//>`)}</div>
+<div class="bg-white rounded-2xl shadow-sm p-3 space-y-3"><label class="font-bold block">Your own instruction</label>
+<textarea value=${tx} onInput=${e=>setTx(e.target.value)} rows="3" placeholder="Type any instruction for the patient, in English" class="w-full p-4 rounded-2xl bg-slate-200 outline-none placeholder-slate-600"/>
+<${Btn} kind="teal" icon="play" off=${!tx.trim()} onClick=${()=>play(tx.trim())}>Play in ${LN[lang]}<//></div>
 ${Who()}<${Btn} kind="teal" h="h-16" icon="check" onClick=${()=>finish('treatment')}>Save & Done<//></div></div>`;
 
 if(sc==='refer'||sc==='emerg'){const E=sc==='emerg';
