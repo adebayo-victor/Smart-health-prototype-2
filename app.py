@@ -261,6 +261,17 @@ class MemoryIndex(db.Model):
     keywords = db.relationship("Keyword", secondary=memory_keywords, backref="memories")
 
 
+class Phrase(db.Model):
+    """Quick-ask questions, treatment instructions and referral reasons shown in the CHW app. Edit them in the
+    database; the page loads them from /api/phrases. kind: ask | instruction | reason."""
+    id = db.Column(db.Integer, primary_key=True)
+    kind = db.Column(db.String(20), nullable=False, index=True)
+    text_en = db.Column(db.String(300), nullable=False)
+    text_ha = db.Column(db.Text, nullable=True)
+    text_pcm = db.Column(db.Text, nullable=True)
+    sort_order = db.Column(db.Integer, nullable=False, default=0)
+
+
 # ==========================================
 # 3. INITIALIZATION & DEMO DATA
 # ==========================================
@@ -279,6 +290,26 @@ def seed_demo_data():
     for w in (w1, w2, w3):
         w.set_password(password)
     db.session.add_all([w1, w2, w3])
+    db.session.commit()
+
+
+DEFAULT_PHRASES = [
+    ("ask", "What brings you here?", "Me ya kawo ka nan?", "Wetin bring you come here?"),
+    ("ask", "Where does it hurt?", "A ina kake jin ciwo?", "Which place dey pain you?"),
+    ("instruction", "Take the tablets 2 times a day for 3 days.", "Ka sha magungunan sau biyu a rana tsawon kwana uku.", "Chop di medicine two times for day, three days."),
+    ("instruction", "Drink plenty of clean water.", "Ka sha ruwa mai tsabta da yawa.", "Drink plenty clean water."),
+    ("instruction", "Come back fast if vomiting.", "Ka dawo da sauri idan kana amai.", "Come back quick if you dey vomit."),
+    ("reason", "Cannot drink", None, None), ("reason", "Vomiting a lot", None, None),
+    ("reason", "Fever many days", None, None), ("reason", "Pregnant", None, None),
+    ("reason", "Very weak", None, None), ("reason", "Fits", None, None),
+]
+
+
+def seed_phrases():
+    if Phrase.query.count():
+        return
+    for i, (kind, en, ha, pcm) in enumerate(DEFAULT_PHRASES):
+        db.session.add(Phrase(kind=kind, text_en=en, text_ha=ha, text_pcm=pcm, sort_order=i))
     db.session.commit()
 
 
@@ -311,6 +342,7 @@ with app.app_context():
     db.create_all()
     ensure_columns()
     seed_demo_data()
+    seed_phrases()
 
 
 # ==========================================
@@ -834,7 +866,9 @@ def inject_globals():
     worker = None
     if "worker_id" in session:
         worker = {"name": session.get("worker_name"), "facility": session.get("facility_name")}
-    return {"csrf_token": session.get("csrf", ""), "current_worker": worker}
+    # home_url: where logos and "home" links should go. Signed-in workers land on the CHW app.
+    return {"csrf_token": session.get("csrf", ""), "current_worker": worker,
+            "home_url": url_for("chw_app") if worker else url_for("home")}
 
 
 @app.template_filter("fromjson")
@@ -901,6 +935,8 @@ def compute_triage(v):
 # ==========================================
 @app.route("/")
 def home():
+    if "worker_id" in session:
+        return redirect(url_for("chw_app"))
     return render_template("start.html")
 
 
@@ -921,9 +957,11 @@ def login():
                 worker_name=worker.full_name, facility_name=worker.facility.name, csrf=secrets.token_urlsafe(32),
             )
             _attempts.pop(ip, None)
-            return redirect(url_for("dashboard"))
+            return redirect(url_for("chw_app"))
         _attempts.setdefault(ip, []).append(time.time())
         return render_template("login.html", error="Invalid worker code or password."), 401
+    if "worker_id" in session:
+        return redirect(url_for("chw_app"))
     return render_template("login.html")
 
 
@@ -1081,6 +1119,18 @@ def api_dashboard():
         "incoming": incoming,
         "attention": attention,
     })
+
+
+@app.route("/api/phrases")
+@login_required
+def api_phrases():
+    """Quick-ask questions, treatment instructions and referral reasons, all from the database."""
+    names = {"ask": "ask", "instruction": "instructions", "reason": "reasons"}
+    out = {"ask": [], "instructions": [], "reasons": []}
+    for r in Phrase.query.order_by(Phrase.sort_order, Phrase.id).all():
+        if r.kind in names:
+            out[names[r.kind]].append({"en": r.text_en, "ha": r.text_ha, "pcm": r.text_pcm})
+    return jsonify(out)
 
 
 @app.route("/api/centers")
@@ -1587,7 +1637,9 @@ def tts_instruction():
     if language != "en":
         lang_name = {"ha": "Hausa", "pcm": "Nigerian Pidgin"}.get(language, "Hausa")
         # Gemini first; the LiteLLM model is the fallback.
-        translated = gemini_translate(text, lang_name)
+        row = Phrase.query.filter_by(text_en=text).first()   # a stored, checked translation beats a live one
+        stored = (row.text_ha if language == "ha" else row.text_pcm) if row else None
+        translated = stored or gemini_translate(text, lang_name)
         if translated:
             target_text = translated
         else:
