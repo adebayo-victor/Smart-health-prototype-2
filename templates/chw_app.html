@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>SmartHealth – CHW App</title>
+<meta name="csrf-token" content="{{ csrf_token }}">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&display=swap">
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/htm@3.1.1/dist/htm.umd.js"></script>
+<style>
+:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{font-family:'Atkinson Hyperlegible',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;background:#e2e8f0;color:#0f172a;font-size:18px}
+button,input,textarea{font-family:inherit}
+@keyframes p2{0%,100%{box-shadow:0 0 0 0 rgba(225,29,72,.5)}50%{box-shadow:0 0 0 16px rgba(225,29,72,0)}}
+.rec{animation:p2 1s infinite}@keyframes sp{to{transform:rotate(360deg)}}.spin{animation:sp .8s linear infinite}
+html{-webkit-text-size-adjust:100%}
+:root{padding-left:env(safe-area-inset-left,0px);padding-right:env(safe-area-inset-right,0px)}
+@media(max-width:359px){body{font-size:16px}}
+@media(min-width:1024px){body{font-size:19px}.cols{display:grid;grid-template-columns:1fr 1fr;gap:1rem;align-items:start}.cols>*{margin:0!important}}
+@media(min-width:640px){body{padding:1rem 0}}
+@media print{.noprint{display:none!important}}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<!--{% raw %}--><script>
+/* ---------- Mock backend: same URLs, request bodies and response shapes as the Flask templates ----------
+   api(url,{json,form,method}) has the same signature as SH.api() in static/app.js, so going live means
+   replacing the body of api() with `return SH.api(url,o)`. Routes marked (ASSUMED) were not readable. */
+const {useState,useEffect}=React; const html=htm.bind(React.createElement);
+const sleep=ms=>new Promise(r=>setTimeout(r,ms)); const NET={off:false};
+const FAC=[{id:1,name:'Murtala Muhammed Specialist Hospital',location:'Kano',short_code:'MU'},{id:2,name:'Aminu Kano Teaching Hospital',location:'Kano',short_code:'AK'}];
+let PTS=[
+{id:1,full_name:'Musa Bello',age_years:34,sex:'M',village_lga:'Unguwa Uku',phone:'08031234567',allergies:'',hospital_id:'MU-014'},
+{id:2,full_name:'Musa Ibrahim',age_years:12,sex:'M',village_lga:'Sabon Gari',phone:'',allergies:'Penicillin',hospital_id:null},
+{id:3,full_name:'Aisha Kabir',age_years:28,sex:'F',village_lga:'Sabon Gari',phone:'08098765432',allergies:'',hospital_id:null},
+{id:4,full_name:'Fatima Idris',age_years:41,sex:'F',village_lga:'Kofar Gabas',phone:'',allergies:'Sulfa drugs',hospital_id:null}];
+const ENC={1:[{id:11,date:'24 Nov 2026, 09:10 AM',triage_tier:'YELLOW',stage:'diagnosis',diagnosis:'Malaria',referral_code:null},{id:7,date:'10 Oct 2026, 02:30 PM',triage_tier:'GREEN',stage:'triage',diagnosis:null,referral_code:null}],4:[{id:12,date:'23 Nov 2026, 11:00 AM',triage_tier:'YELLOW',stage:'referral',diagnosis:'Typhoid',referral_code:'AK-7F3K2Q'}]};
+const PH=[{en:'What brings you here?',ha:'Me ya kawo ka nan?',pcm:'Wetin bring you come here?'},
+{en:'Take the tablets 2 times a day for 3 days.',ha:'Ka sha magungunan sau biyu a rana tsawon kwana uku.',pcm:'Chop di medicine two times for day, three days.'},
+{en:'Drink plenty of clean water.',ha:'Ka sha ruwa mai tsabta da yawa.',pcm:'Drink plenty clean water.'},
+{en:'Come back fast if vomiting.',ha:'Ka dawo da sauri idan kana amai.',pcm:'Come back quick if you dey vomit.'}];
+const FU=[{en:'Since when have you had the headache?',ha:'Tun yaushe kake jin ciwon kai?',pcm:'From when you start to get this headache?',ans:{statement:'Tun jiya da yamma.',translation:'Since yesterday evening.'}},
+{en:'Where on your head do you feel it?',ha:'A ina a kanka kake jin ciwon?',pcm:'Which part for your head e dey pain you?',ans:{statement:'A goshi da kuma bayan idanu.',translation:'At the front, and behind the eyes.'}},
+{en:'Do you feel it behind your eyes?',ha:'Kana jin shi a bayan idanunka?',pcm:'You dey feel am for back of your eyes?',ans:{statement:'Eh, haka ne.',translation:'Yes.'}}];
+const LIM={temp:[25,45],hr:[20,300],sys_bp:[40,300],dia_bp:[20,200],spo2:[30,100]};
+/* same thresholds as compute_triage() in app.py */
+const rule=v=>{const R=[],Y=[];const t=(k,l,rl,rh,yl,yh)=>{const x=v[k];if(x==null)return;const s=l+' '+x;if(x<rl||x>=rh)R.push(s);else if(x<yl||x>=yh)Y.push(s)};
+t('spo2','Oxygen',90,1e9,95,1e9);t('sys_bp','Top BP',90,180,100,140);t('dia_bp','Bottom BP',-1e9,120,-1e9,90);t('hr','Pulse',40,130,50,100);t('temp','Temp',35,40,36,38);
+return R.length?['RED',R]:Y.length?['YELLOW',Y]:['GREEN',['All vitals normal']]};
+let ENCID=100;
+/* LIVE = served by Flask (real fetch). Open the file directly, or add ?mock=1, to keep using the mock backend above. */
+const LIVE=location.protocol!=='file:'&&!/[?&]mock=1/.test(location.search);
+async function api(url,o={}){
+if(!LIVE)return mockApi(url,o);
+if(NET.off)throw new Error('No network. This will be sent when your phone is online again.');
+const h={'X-CSRF-Token':(document.querySelector('meta[name="csrf-token"]')||{}).content||''};let body;
+if(o.json){h['Content-Type']='application/json';body=JSON.stringify(o.json)}else if(o.form instanceof FormData)body=o.form;
+let r;try{r=await fetch(url,{method:o.method||(body?'POST':'GET'),headers:h,body,credentials:'same-origin'})}catch(e){throw new Error('Cannot reach the server. Check your connection.')}
+if(r.status===401){location.href='/login';throw new Error('Your session expired. Please log in again.')}
+const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||d.message||'Server error '+r.status);return d}
+/* Microphone: one MediaRecorder at a time (main recording or one follow-up answer). No-ops in mock mode. */
+const REC={mr:null,ch:[],st:null};
+async function recStart(){if(!LIVE)return;const st=await navigator.mediaDevices.getUserMedia({audio:true});REC.st=st;REC.ch=[];const mr=new MediaRecorder(st);mr.ondataavailable=e=>{if(e.data&&e.data.size)REC.ch.push(e.data)};mr.start();REC.mr=mr}
+function recStop(){return new Promise(res=>{const mr=REC.mr;if(!LIVE||!mr)return res(null);mr.onstop=()=>{if(REC.st)REC.st.getTracks().forEach(t=>t.stop());REC.mr=null;res(new Blob(REC.ch,{type:mr.mimeType||'audio/webm'}))};mr.stop()})}
+function recAbort(){try{if(REC.mr&&REC.mr.state!=='inactive')REC.mr.stop();if(REC.st)REC.st.getTracks().forEach(t=>t.stop())}catch(e){}REC.mr=null}
+const audioForm=(blob,extra)=>{const f=new FormData();if(blob){const t=blob.type||'';f.append('audio',blob,'recording.'+(t.includes('mp4')?'m4a':t.includes('ogg')?'ogg':'webm'))}for(const k in extra)f.append(k,extra[k]);return f};
+const normOpts=d=>d.details&&d.details.length?d.details:(d.options||[]).map(o=>typeof o==='string'?{name:o,why:d.reasoning||'',meds:'',adm:''}:o);
+const qGet=()=>{try{return JSON.parse(localStorage.getItem('sh_queue')||'[]')}catch(e){return[]}};const qSet=a=>{try{localStorage.setItem('sh_queue',JSON.stringify(a))}catch(e){}};
+async function mockApi(url,o={}){
+if(NET.off)throw new Error('No network. This will be sent when your phone is online again.');
+await sleep(url.includes('diagnosis')?1300:600);const [p,qs]=url.split('?');const b=o.json||(o.form&&o.form.entries?Object.fromEntries(o.form.entries()):{});
+if(p==='/api/dashboard')return{stats:{RED:1,YELLOW:2,GREEN:12,incoming:1},incoming:[{referral_code:'AK-7F3K2Q',patient_name:'Hauwa Danjuma',from_facility:'PHC Akinyele',triage_tier:'YELLOW'}],attention:[{patient:PTS[0],triage_tier:'YELLOW',stage:'diagnosis'},{patient:PTS[3],triage_tier:'YELLOW',stage:'referral'}]};
+if(p==='/api/centers')return FAC;
+if(p==='/api/patients/check-duplicates')return{matches:[]};
+if(p==='/api/followups')return{questions:FU.map(({ans,...q})=>q)};
+if(p==='/api/followup_answer'){const f=FU.find(x=>x.en===b.question);if(!f)throw new Error('Question not found.');return f.ans}
+if(p==='/api/save_encounter'){if(!b.patient_id)throw new Error('Choose a patient first.');const id=b.encounter_id||++ENCID;ENC[b.patient_id]=[{id,date:'Today',triage_tier:b.tier||null,stage:b.stage,diagnosis:b.diagnosis||null,referral_code:null},...(ENC[b.patient_id]||[]).filter(e=>e.id!==id)];return{status:'saved',encounter_id:id}}
+if(p==='/api/tts_instruction'){const f=PH.concat(FU).find(x=>x.en===b.text);return{audio_url:null,translated_text:f?f[b.language]:b.text}}
+if(p==='/api/translate')return{patient_name:'Musa',dialect:'Hausa',statement:'Ina da ciwon kai da zazzabi tun kwana uku, jikina yana ciwo.',translation:'I have a headache and fever for 3 days, and my body aches.',vitals:{temp:'38.6',bp_sys:'N/A',bp_dia:'N/A',spo2:'N/A'},conclusion:'Headache and fever for 3 days with body pain.',encounter_id:++ENCID};
+if(p==='/api/patients'&&o.json){const n=(b.full_name||'').trim();if(n.length<2)throw new Error("Enter the patient's full name.");const a=b.age_years;if(a!==''&&a!=null&&(a<0||a>120))throw new Error('Age must be between 0 and 120.');const x={id:50+PTS.length,full_name:n,age_years:a===''||a==null?null:+a,sex:b.sex||null,village_lga:'',phone:'',allergies:'',hospital_id:null};PTS=[x,...PTS];return x}
+if(p==='/api/patients'){const t=(qs||'').replace('q=','').toLowerCase().split(/\s+/).filter(Boolean);return PTS.filter(x=>t.every(w=>x.full_name.toLowerCase().includes(decodeURIComponent(w)))).slice(0,t.length?15:8)}
+if(p.startsWith('/api/encounter/'))return{status:'linked'};
+if(p.startsWith('/api/patients/')){const x=PTS.find(z=>z.id==p.split('/').pop());return{...x,encounters:ENC[x.id]||[]}}
+if(p==='/api/triage'){const v={};for(const k in LIM)if(b[k]!=null)v[k]=b[k];if(!Object.keys(v).length)throw new Error('Enter at least one vital sign.');if(v.sys_bp&&v.dia_bp&&v.sys_bp<=v.dia_bp)throw new Error('Top BP must be higher than bottom BP.');const[t,tr]=rule(v);return{encounter_id:b.encounter_id||++ENCID,triage_data:{tier:t,trigger:tr.join(', '),notes:t==='RED'?'Immediate attention needed. Refer without delay.':t==='YELLOW'?'Needs prompt assessment. Recheck vitals in 15 to 30 minutes.':'No urgent concerns. Give routine care.'}}}
+if(p==='/api/diagnosis')return{options:[{name:'Malaria',why:'Fever and body pain',meds:'Malaria tablets (ACT) for 3 days',adm:'Not needed unless vomiting or confused'},{name:'Typhoid',why:'Fever',meds:'Antibiotics from the clinic',adm:'Needed if belly pain is bad'},{name:'Flu',why:'Fever and pain',meds:'Rest, water, paracetamol',adm:'Not needed'}]}; /* ASSUMED */
+if(p==='/api/referral'){if(!b.center_id)throw new Error('Choose a hospital.');if(!(b.reason||'').trim())throw new Error('Say why you are sending this patient.');const f=FAC.find(x=>x.id==b.center_id);return{referral_code:f.short_code+'-'+Math.random().toString(36).slice(2,8).toUpperCase(),referral_qr:null,facility:f.name}}
+if(p==='/api/lookup'){if(b.code!=='AK-7F3K2Q')throw new Error('Referral code not found.');return{patient_name:'Fatima Idris',from_facility:'PHC Akinyele',reason:'Suspected: Typhoid',triage_tier:'YELLOW',diagnosis:'Typhoid',vitals:{temp:38.4,spo2:96},patient:PTS[3],encounter_id:12}}
+throw new Error('Not found');}
+
+/* ---------- UI ---------- */
+const P={volume:'<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>',
+back:'<path d="m15 18-6-6 6-6"/>',next:'<path d="m9 18 6-6-6-6"/>',plus:'<path d="M5 12h14"/><path d="M12 5v14"/>',minus:'<path d="M5 12h14"/>',x:'<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+mic:'<path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/>',
+stop:'<rect x="6" y="6" width="12" height="12" rx="2"/>',redo:'<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>',
+search:'<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',alert:'<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
+qr:'<rect width="5" height="5" x="3" y="3" rx="1"/><rect width="5" height="5" x="16" y="3" rx="1"/><rect width="5" height="5" x="3" y="16" rx="1"/><path d="M21 16h-3a2 2 0 0 0-2 2v3"/><path d="M12 7v3a2 2 0 0 1-2 2H7"/>',
+user:'<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
+hospital:'<path d="M12 6v4"/><path d="M14 8h-4"/><path d="M14 14h-4"/><path d="M14 18h-4"/><path d="M18 12h2a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2h2"/><path d="M18 22V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v18"/>',
+play:'<polygon points="6 3 20 12 6 21 6 3"/>',check:'<path d="M20 6 9 17l-5-5"/>',pulse:'<path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/>',
+home:'<path d="M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8"/><path d="M3 10a2 2 0 0 1 .709-1.528l7-5.999a2 2 0 0 1 2.582 0l7 5.999A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+drop:'<path d="M12 22a7 7 0 0 0 7-7c0-2-1-3.9-3-5.5s-3.5-4-4-6.5c-.5 2.5-2 4.9-4 6.5C6 11.1 5 13 5 15a7 7 0 0 0 7 7z"/>',thermo:'<path d="M14 4v10.54a4 4 0 1 1-4 0V4a2 2 0 0 1 4 0Z"/>',
+heart:'<path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/>',
+wifi:'<path d="M12 20h.01"/><path d="M2 8.82a15 15 0 0 1 20 0"/><path d="M5 12.86a10 10 0 0 1 14 0"/><path d="M8.5 16.43a5 5 0 0 1 7 0"/>',
+print:'<polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect width="12" height="8" x="6" y="14"/>',
+loader:'<path d="M21 12a9 9 0 1 1-6.219-8.56"/>'};
+const Icon=({n,c='',s=24})=>html`<svg width=${s} height=${s} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" class=${'shrink-0 '+c} aria-hidden="true" dangerouslySetInnerHTML=${{__html:P[n]}}/>`;
+const K={teal:'bg-teal-700 text-white shadow-md',rose:'bg-rose-600 text-white shadow-md',grey:'bg-slate-200 text-slate-900',link:'text-slate-600 underline underline-offset-4'};
+const Btn=({icon,kind='grey',h='h-14',onClick,children,cls='',right,big,off})=>html`<button onClick=${onClick} disabled=${off} class=${`w-full ${h} px-4 rounded-2xl flex items-center justify-center gap-3 font-bold ${big||'text-lg'} active:scale-[.98] transition disabled:opacity-40 ${K[kind]} ${cls}`}>${icon&&html`<${Icon} n=${icon}/>`}<span>${children}</span>${right&&html`<${Icon} n=${right}/>`}</button>`;
+const TIER={RED:['Red','bg-rose-600 text-white','Go to hospital now'],YELLOW:['Yellow','bg-amber-400 text-slate-900','Needs care soon'],GREEN:['Green','bg-green-600 text-white','Safe to treat here']};
+const Chip=({t})=>html`<span class=${`px-3 py-1 rounded-full font-bold text-base ${TIER[t][1]}`}>${TIER[t][0]}</span>`;
+const SG={triage:'Triage done',diagnosis:'Cause chosen',referral:'Referred',translation:'Intake only',treatment:'Treated here'};
+const sex=s=>s==='F'?'Female':s==='M'?'Male':'';
+const VS=[['temp','Temperature','°C','thermo',.1,37],['hr','Pulse','/min','heart',2,80],['sys_bp','Top BP','','pulse',5,120],['dia_bp','Bottom BP','','pulse',5,80],['spo2','Oxygen','%','drop',1,97]];
+const LN={ha:'Hausa',pcm:'Pidgin',en:'English'};
+const CHIPS=['Cannot drink','Vomiting a lot','Fever many days','Pregnant','Very weak','Fits'];
+const STEPS=[['Listen','mic','listen'],['Vitals & Cause','search','assess'],['Act','check','act']];
+
+function App(){
+const [sc,setSc]=useState('home'),[pt,setPt]=useState(null),[enc,setEnc]=useState(null),[off,setOff]=useState(false),[queued,setQueued]=useState(qGet().length);
+const [busy,setBusy]=useState(''),[toast,setToast]=useState(''),[dev,setDev]=useState(false),[lang,setLang]=useState('ha');
+const [dash,setDash]=useState(null),[cur,setCur]=useState(null),[q,setQ]=useState(''),[res,setRes]=useState([]);
+const [ph,setPh]=useState('idle'),[secs,setSecs]=useState(0),[tr,setTr]=useState(null),[ok,setOk]=useState(false),[skip,setSkip]=useState(false),[mt,setMt]=useState(null),[nw,setNw]=useState(null);
+const [vit,setVit]=useState({}),[tri,setTri]=useState(null),[opts,setOpts]=useState([]),[cause,setCause]=useState(null);
+const [fac,setFac]=useState(FAC),[cid,setCid]=useState(null),[reason,setReason]=useState(''),[ticket,setTicket]=useState(null),[lk,setLk]=useState(''),[lr,setLr]=useState(null),[em,setEm]=useState('');
+const [sym,setSym]=useState(''),[skipV,setSkipV]=useState(false),[ran,setRan]=useState(false),[dx,setDx]=useState(''),[ask,setAsk]=useState(''),[fu,setFu]=useState([]),[fua,setFua]=useState({}),[rq,setRq]=useState(null),[ret,setRet]=useState('act'),[aud,setAud]=useState(null),[voiceV,setVoiceV]=useState({}),[dup,setDup]=useState([]);
+NET.off=off;
+const go=s=>{setSc(s);window.scrollTo(0,0)};
+const say=m=>{setToast(m);setTimeout(()=>setToast(''),2600)};
+const run=async(label,fn)=>{setBusy(label);try{return await fn()}catch(e){say(e.message)}finally{setBusy('')}};
+const play=async text=>{if(off)return say('Voice needs internet');const r=await run('Making voice',()=>api('/api/tts_instruction',{json:{text,language:lang}}));if(r){try{if(!r.audio_url)throw 0;await new Audio(r.audio_url).play()}catch(e){try{speechSynthesis.cancel();speechSynthesis.speak(new SpeechSynthesisUtterance(r.translated_text))}catch(e2){}}}};
+const reset=()=>{setPh('idle');setSecs(0);setTr(null);setOk(false);setSkip(false);setMt(null);setNw(null);setVit({});setTri(null);setOpts([]);setCause(null);setSym('');setSkipV(false);setRan(false);setDx('');setAsk('');setFu([]);setFua({});setRq(null);setAud(null);setVoiceV({});setDup([]);recAbort();setCid(null);setReason('');setTicket(null);setQ('');setRes([])};
+const start=(p,e=null)=>{reset();setPt(p);setEnc(e);go('listen')};
+useEffect(()=>{if(sc==='home')api('/api/dashboard').then(setDash).catch(()=>{});},[sc,off]);
+useEffect(()=>{if(ph!=='rec')return;const t=setInterval(()=>setSecs(s=>s+1),1000);return()=>clearInterval(t)},[ph]);
+useEffect(()=>{if(!rq)return;const t=setInterval(()=>setRq(r=>r&&{...r,s:r.s+1}),1000);return()=>clearInterval(t)},[rq&&rq.q]);
+useEffect(()=>{const a=()=>setOff(false),b=()=>setOff(true);window.addEventListener('online',a);window.addEventListener('offline',b);if(!navigator.onLine)setOff(true);return()=>{window.removeEventListener('online',a);window.removeEventListener('offline',b)}},[]);
+useEffect(()=>{if(off)return;(async()=>{const left=[];for(const it of qGet()){try{await api(it.url,{json:it.json})}catch(e){left.push(it)}}qSet(left);setQueued(left.length)})()},[off]);
+useEffect(()=>{if(sc==='refer'||sc==='emerg')api('/api/centers').then(setFac).catch(()=>{})},[sc]);
+const search=async v=>{setQ(v);if(!v.trim()){setRes([]);return}try{setRes(await api('/api/patients?q='+encodeURIComponent(v)))}catch(e){}};
+const pick=async p=>{setPt(p);if(enc)api(`/api/encounter/${enc}/patient`,{json:{patient_id:p.id}}).catch(()=>{})};
+const vset={};for(const [k] of VS)if(vit[k]!=null)vset[k]=vit[k];const vn=Object.keys(vset).length;
+const [lt,tr2]=vn&&!skipV?rule(vset):[null,[]];
+const fullText=()=>tr?[tr.translation,...Object.entries(fua).map(([qn,a])=>qn+' '+a.translation)].join(' '):'';
+const runAssess=async(text=sym,eid0=enc)=>{let eid=eid0;const useV=!skipV&&vn>0;if(!text.trim()&&!useV)return say('Type what is wrong, or add a vital sign.');
+let t=null;if(useV){const r=await run('Checking vitals…',()=>api('/api/triage',{json:{patient_id:pt?pt.id:null,encounter_id:eid,...vset}}));if(!r)return;if(r.encounter_id){eid=r.encounter_id;setEnc(eid)}t=r.triage_data}
+setTri(t);if(!text.trim()){setOpts([]);setRan(true);return}const d=await run('Finding possible causes…',()=>api('/api/diagnosis',{json:{encounter_id:eid,patient_id:pt?pt.id:null,symptoms:text,tier:t&&t.tier,...(useV?vset:{})}}));if(d&&d.encounter_id)setEnc(d.encounter_id);const o=d?normOpts(d):[];setOpts(o);setRan(true);if(o.length&&!dx){setCause(o[0]);setDx(o[0].name)}};
+const savePt=async force=>{const body={...nw,age_years:nw.age_years===''?null:+nw.age_years};
+if(!force){const d=await run('Checking for duplicates…',()=>api('/api/patients/check-duplicates',{json:{full_name:body.full_name,age_years:body.age_years,sex:body.sex}}));if(!d)return;if(d.matches&&d.matches.length){setDup(d.matches);return}}
+const p=await run('Saving',()=>api('/api/patients',{json:body}));if(p){setDup([]);await pick(p);setNw(null)}};
+const Who=()=>pt?null:html`<div class="space-y-3"><h2 class="text-xl font-bold">Who is this? <span class="font-normal text-base text-slate-600">(needed to save)</span></h2>
+<label class="h-16 bg-slate-200 rounded-2xl flex items-center gap-3 px-4"><${Icon} n="search"/><input value=${q} onInput=${e=>search(e.target.value)} placeholder="Search name or phone" class="flex-1 h-full bg-transparent outline-none placeholder-slate-600"/></label>
+${res.map(p=>html`<${PRow} key=${p.id} p=${p} onClick=${()=>pick(p)}/>`)}
+${!nw?html`<${Btn} icon="plus" onClick=${()=>setNw({full_name:q||'',age_years:'',sex:''})}>New Patient<//>`:html`<div class="bg-white rounded-2xl shadow-sm p-4 space-y-3">
+<input value=${nw.full_name} onInput=${e=>setNw({...nw,full_name:e.target.value})} placeholder="Full name" class="w-full h-16 px-4 rounded-2xl bg-slate-200 outline-none placeholder-slate-600"/>
+<input type="number" inputmode="numeric" value=${nw.age_years} onInput=${e=>setNw({...nw,age_years:e.target.value})} placeholder="Age in years" class="w-full h-16 px-4 rounded-2xl bg-slate-200 outline-none placeholder-slate-600"/>
+<div class="grid grid-cols-2 gap-3">${[['M','Male'],['F','Female']].map(([k,l])=>html`<button key=${k} onClick=${()=>setNw({...nw,sex:k})} class=${`h-14 rounded-2xl font-bold flex items-center justify-center gap-2 ${nw.sex===k?'bg-teal-700 text-white':'bg-slate-200'}`}>${nw.sex===k&&html`<${Icon} n="check" s=${20}/>`}${l}</button>`)}</div>
+${dup.length>0&&html`<div class="bg-amber-100 rounded-xl p-3 space-y-2"><b>Is this the same person?</b>${dup.map(m=>html`<${PRow} key=${m.id} p=${m} onClick=${()=>{setDup([]);setNw(null);pick(m)}}/>`)}<${Btn} onClick=${()=>savePt(true)}>No, create a new patient<//></div>`}
+<${Btn} kind="teal" icon="check" onClick=${()=>savePt(false)}>Save Patient<//></div>`}</div>`;
+const finish=async stage=>{if(!pt){say('Choose or add the patient first, so this is saved to their record.');return}
+const body={patient_id:pt.id,encounter_id:enc,stage,translation:fullText(),symptoms:sym,diagnosis:dx,tier:tri?tri.tier:null,vitals:vset,reason,dialect:tr&&tr.dialect,statement:tr&&tr.statement,conclusion:tr&&tr.conclusion,tc_actions:tr&&tr.tc_actions,medications:cause&&cause.name===dx?cause.meds:null};
+if(off||!navigator.onLine&&LIVE){qSet([...qGet(),{url:'/api/save_encounter',json:body}]);setQueued(qGet().length);say('Saved on phone. It will be sent when signal returns.');return go('home')}
+const r=await run('Saving…',()=>api('/api/save_encounter',{json:body}));if(r){say('Saved to '+pt.full_name+"'s record.");go('home')}};
+const Top=({title,step,back,a})=>html`<header class="noprint bg-white shadow-sm px-5 pt-3 pb-4">
+<div class="flex items-center justify-between"><button onClick=${()=>go(back)} class="h-14 pr-4 flex items-center gap-1 font-bold"><${Icon} n="back"/><span>Back</span></button>
+<button onClick=${()=>play(title)} class="h-14 px-3 flex items-center gap-2 text-teal-700 font-bold"><${Icon} n="volume" s=${28}/><span>Listen</span></button></div>
+<h1 class="text-2xl font-bold">${title}</h1>${dev&&a&&html`<div class="mt-1 text-base font-mono bg-slate-100 rounded-lg px-2 py-1 text-slate-700">${a}</div>`}
+${pt&&sc!=='home'&&html`<div class="flex items-center gap-2 mt-2 text-slate-700"><${Icon} n="user" s=${20}/>${pt.full_name}${tri&&html`<${Chip} t=${tri.tier}/>`}</div>`}
+${step!=null&&html`<div class="flex gap-2 mt-3">${STEPS.map(([l,i,sn],k)=>html`<button key=${l} onClick=${()=>go(sn)} class="flex-1 text-left"><div class=${`h-2 rounded-full ${k<=step?'bg-teal-700':'bg-slate-200'}`}/><div class=${`flex items-center gap-1 mt-1 leading-tight text-sm sm:text-base ${k===step?'font-bold text-teal-700':'text-slate-600'}`}><${Icon} n=${i} s=${16}/>${l}</div></button>`)}</div>`}</header>`;
+const Lang=()=>html`<div class="grid grid-cols-3 gap-2">${[['ha','Hausa'],['pcm','Pidgin'],['en','English']].map(([k,l])=>html`<button key=${k} onClick=${()=>setLang(k)} class=${`h-14 rounded-2xl font-bold flex items-center justify-center gap-2 ${lang===k?'bg-teal-700 text-white':'bg-slate-200'}`}>${lang===k&&html`<${Icon} n="check" s=${20}/>`}${l}</button>`)}</div>`;
+const Allergy=()=>pt&&pt.allergies?html`<div class="bg-amber-100 border-l-8 border-amber-500 rounded-2xl p-4 flex items-center gap-3 font-bold"><${Icon} n="alert" c="text-amber-700"/>Allergy: ${pt.allergies}</div>`:null;
+const PRow=({p,onClick})=>html`<button onClick=${onClick} class="w-full min-h-[68px] bg-white rounded-2xl shadow-sm px-4 py-3 flex items-center gap-3 text-left"><${Icon} n="user" c="text-teal-700"/><span class="flex-1"><b class="block">${p.full_name}</b><span class="text-slate-700">${[p.age_years&&p.age_years+' yrs',sex(p.sex),p.village_lga].filter(Boolean).join(', ')}</span></span><${Icon} n="next" c="text-slate-500"/></button>`;
+const Off=()=>off&&html`<div class="noprint bg-slate-900 text-white px-5 py-3 flex items-center gap-2 font-bold"><${Icon} n="wifi"/>No network. Voice and referral codes wait for signal.</div>`;
+let b;
+
+if(sc==='home'){const S=dash?dash.stats:{RED:0,YELLOW:0,GREEN:0};b=html`<div>
+<header class="px-5 py-4 bg-white shadow-sm flex items-center gap-3"><div class="w-12 h-12 rounded-2xl bg-teal-700 text-white flex items-center justify-center"><${Icon} n="pulse" s=${28}/></div>
+<div class="flex-1"><div class="font-bold leading-tight">Hello, ${dash&&dash.worker?dash.worker.name:'Amina'}</div><div class="text-base text-slate-700">${dash&&dash.worker?dash.worker.facility:'Murtala Muhammed, Kano'}</div></div>
+<button onClick=${()=>setOff(!off)} class=${`h-14 px-3 rounded-2xl flex items-center gap-2 font-bold ${off?'bg-slate-900 text-white':'text-green-700'}`}><${Icon} n="wifi"/><span>${off?'Offline':'Online'}</span></button></header><${Off}/>
+<div class="p-4 sm:p-5 lg:p-8 space-y-4">
+${dev&&html`<div class="text-base font-mono bg-slate-100 rounded-lg px-2 py-1">GET /api/dashboard (ASSUMED JSON twin of /dashboard stats + incoming)</div>`}
+<${Btn} kind="teal" h="h-24" big="text-xl" icon="mic" onClick=${()=>start(null)}>New Patient: Tap and Talk<//>
+<${Btn} kind="rose" h="h-16" icon="alert" onClick=${()=>{reset();setPt(null);setEm('');setRet('home');go('emerg')}}>Emergency Referral<//>
+<h2 class="text-xl font-bold pt-1">Use one step on its own</h2>
+<div class="grid grid-cols-3 gap-3">${[['mic','Translate',()=>start(null)],['search','Diagnose',()=>{reset();setPt(null);go('assess')}],['hospital','Refer',()=>{reset();setPt(null);setEm('');setRet('home');go('refer')}]].map(([i,l,f])=>html`<button key=${l} onClick=${f} class="h-24 rounded-2xl bg-slate-200 font-bold flex flex-col items-center justify-center gap-1 active:scale-[.98] transition"><${Icon} n=${i} c="text-teal-700"/>${l}</button>`)}</div>
+<div class="grid grid-cols-3 gap-3">${['RED','YELLOW','GREEN'].map(t=>html`<div key=${t} class=${`h-24 rounded-2xl shadow-md flex flex-col items-center justify-center font-bold ${TIER[t][1]}`}><span class="text-3xl">${S[t]||0}</span><span class="text-base">${TIER[t][0]}</span></div>`)}</div>
+${queued>0&&html`<div class="bg-white rounded-2xl p-4 shadow-sm flex items-center gap-3 font-bold"><${Icon} n="wifi" c="text-amber-600"/>${queued} waiting to send</div>`}
+<div class="grid grid-cols-2 gap-3"><${Btn} icon="search" onClick=${()=>{reset();go('find')}}>Find Patient<//><${Btn} icon="qr" onClick=${()=>{setLk('');setLr(null);go('lookup')}}>Receive Referral<//></div>
+${dash&&dash.incoming.map(i=>html`<button key=${i.referral_code} onClick=${()=>{setLk(i.referral_code);setLr(null);go('lookup')}} class="w-full bg-white rounded-2xl shadow-md border-l-8 border-teal-700 p-4 flex items-center gap-3 text-left"><${Icon} n="hospital" c="text-teal-700"/><span class="flex-1"><b class="block">Coming to you: ${i.patient_name}</b><span class="text-slate-700">From ${i.from_facility}</span></span><${Chip} t=${i.triage_tier}/></button>`)}
+<h2 class="text-2xl font-bold pt-1">Needs Attention</h2>
+${dash&&dash.attention.map(a=>html`<button key=${a.patient.id} onClick=${async()=>{const d=await run('Opening',()=>api('/api/patients/'+a.patient.id));if(d){setCur(d);go('detail')}}} class="w-full min-h-[68px] bg-white rounded-2xl shadow-sm border-l-8 border-amber-400 px-4 py-3 flex items-center gap-3 text-left"><span class="flex-1"><b class="block">${a.patient.full_name}</b><span class="text-slate-700">${SG[a.stage]}</span></span><${Chip} t=${a.triage_tier}/></button>`)}
+<${Btn} kind="link" icon=${dev?'x':'check'} onClick=${()=>setDev(!dev)}>${dev?'Hide':'Show'} API map (for developers)<//>
+${LIVE&&html`<${Btn} kind="link" icon="home" onClick=${()=>{location.href='/logout'}}>Log out<//>`}
+</div></div>`}
+
+if(sc==='find') b=html`<div><${Top} title="Find Patient" back="home" a="GET /api/patients?q=  (name, phone or hospital ID; 8 recent when empty)"/><div class="p-4 sm:p-5 lg:p-8 space-y-3">
+<label class="h-16 bg-slate-200 rounded-2xl flex items-center gap-3 px-4"><${Icon} n="search"/><input value=${q} onInput=${e=>search(e.target.value)} placeholder="Type a name or phone" class="flex-1 h-full bg-transparent outline-none placeholder-slate-600"/></label>
+<div class="cols space-y-3">${(q?res:PTS.slice(0,8)).map(p=>html`<${PRow} key=${p.id} p=${p} onClick=${async()=>{const d=await run('Opening',()=>api('/api/patients/'+p.id));if(d){setCur(d);go('detail')}}}/>`)}</div>
+${q&&!res.length&&html`<p class="text-center py-4 text-slate-700">No patient found.</p>`}
+</div></div>`;
+
+if(sc==='detail'&&cur) b=html`<div><${Top} title=${cur.full_name} back="find" a="GET /api/patients/:id  (+ encounters, up to 20)"/><div class="p-4 sm:p-5 lg:p-8 space-y-4">
+${cur.allergies&&html`<div class="bg-amber-100 border-l-8 border-amber-500 rounded-2xl p-4 flex items-center gap-3 font-bold"><${Icon} n="alert" c="text-amber-700"/>Allergy: ${cur.allergies}</div>`}
+<div class="bg-slate-200 rounded-2xl p-4 space-y-1"><p>${[cur.age_years&&cur.age_years+' yrs',sex(cur.sex),cur.village_lga].filter(Boolean).join(' | ')}</p>${cur.phone&&html`<p>${cur.phone}</p>`}</div>
+<${Btn} kind="teal" h="h-16" icon="mic" onClick=${()=>start(cur)}>New Visit<//>
+<h2 class="text-2xl font-bold">Past Visits</h2>${!cur.encounters.length&&html`<p class="text-slate-700">No visits yet.</p>`}
+<div class="cols space-y-3">${cur.encounters.map(e=>html`<div key=${e.id} class="bg-white rounded-2xl shadow-sm p-4 space-y-2"><div class="flex items-center justify-between"><span class="text-slate-700">${e.date}</span>${e.triage_tier&&html`<${Chip} t=${e.triage_tier}/>`}</div>
+<div class="font-bold">${e.diagnosis||'No cause chosen'} <span class="font-normal text-slate-700">(${SG[e.stage]})</span></div>${e.referral_code&&html`<div class="font-mono font-bold tracking-wider">${e.referral_code}</div>`}
+<${Btn} icon="volume" onClick=${()=>play(`${cur.full_name}: ${e.diagnosis||'visit'}.`)}>Read Summary<//></div>`)}</div></div></div>`;
+
+if(sc==='listen'){const min=secs<2;const tapRec=async()=>{if(off)return;if(ph==='idle'||ph==='ready'){try{await recStart()}catch(e){return say('Allow the microphone to record.')}setSecs(0);setPh('rec')}else if(ph==='rec'){if(min)return say('Too short. Record at least 2 seconds.');setAud(await recStop());setPh('ready')}};
+const doTr=async()=>{const r=await run('Listening to the recording…',()=>api('/api/translate',{form:audioForm(aud,{language:lang})}));if(r){setTr(r);if(r.encounter_id)setEnc(r.encounter_id);setPh('done');setFua({});const v=r.vitals||{},nv={};for(const k in LIM){const x=parseFloat(v[k]);if(!isNaN(x))nv[k]=x}const sb=parseFloat(v.bp_sys),db2=parseFloat(v.bp_dia);if(!isNaN(sb))nv.sys_bp=sb;if(!isNaN(db2))nv.dia_bp=db2;setVit(x=>({...x,...nv}));setVoiceV(nv);const nm=r.patient_name_mentioned||r.patient_name;if(nm)search(nm);const f=await api('/api/followups',{json:{encounter_id:r.encounter_id||enc,translation:r.translation}}).catch(()=>null);setFu(f&&f.questions?f.questions:[])}};
+const pickAlt=a=>{setTr({...tr,...a,mode:'confirmed'});setVit(x=>({...x,...(a.vitals||{})}));setVoiceV(a.vitals||{})};
+const tapFu=async qn=>{if(off)return;if(!rq){try{await recStart()}catch(e){return say('Allow the microphone to record.')}setRq({q:qn,s:0});return}if(rq.q!==qn)return;if(rq.s<2)return say('Too short. Record at least 2 seconds.');const bl=await recStop();setRq(null);const a=await run('Translating answer…',()=>api('/api/followup_answer',{form:audioForm(bl,{question:qn,language:lang,encounter_id:enc||''})}));if(a)setFua(x=>({...x,[qn]:a}))};
+const dropFu=qn=>setFua(x=>{const n={...x};delete n[qn];return n});
+const need=!pt&&(ok||skip);const IB='w-12 h-12 rounded-xl flex items-center justify-center disabled:opacity-40';
+b=html`<div><${Top} title="Listen" step=${0} back="home" a="POST /api/tts_instruction {text, language} · POST /api/translate (audio ≥2s) · POST /api/followups {encounter_id, translation} · POST /api/followup_answer {encounter_id, question} · POST /api/save_encounter"/><${Off}/><div class="p-4 sm:p-5 lg:p-8 space-y-4">
+${pt&&html`<div class="bg-white rounded-2xl p-4 shadow-sm flex items-center gap-3 font-bold"><${Icon} n="user" c="text-teal-700"/>${pt.full_name}</div>`}<${Allergy}/>
+<${Lang}/>
+<div class="bg-white rounded-2xl shadow-sm p-3 space-y-3"><label class="font-bold block">Ask the patient</label>
+<textarea value=${ask} onInput=${e=>setAsk(e.target.value)} rows="2" placeholder="Type what you want to ask, in English" class="w-full p-4 rounded-2xl bg-slate-200 outline-none placeholder-slate-600"/>
+<${Btn} kind="teal" icon="play" off=${!ask.trim()} onClick=${()=>play(ask.trim())}>Play in ${LN[lang]}<//>
+<${Btn} icon="volume" onClick=${()=>play(PH[0].en)}>Quick ask: "What brings you here?"<//></div>
+${ph==='idle'&&html`<${Btn} kind="teal" h="h-24" icon="mic" big="text-xl" off=${off} onClick=${tapRec}>Tap to Record<//>`}
+${ph==='rec'&&html`<button onClick=${tapRec} class="w-full h-24 rounded-3xl bg-rose-600 text-white shadow-md flex items-center justify-center gap-3 font-bold text-xl rec"><${Icon} n="stop" s=${30}/><span>Stop ${String(Math.floor(secs/60)).padStart(2,'0')}:${String(secs%60).padStart(2,'0')}</span></button>`}
+${ph==='ready'&&html`<div class="space-y-3"><div class="bg-teal-50 border border-teal-200 rounded-2xl p-4 flex items-center gap-3 font-bold"><${Icon} n="check" c="text-teal-700"/>Recording saved (${secs}s)</div>
+<${Btn} kind="teal" h="h-20" icon="check" big="text-xl" onClick=${doTr}>Translate<//><${Btn} icon="redo" onClick=${tapRec}>Record Again<//></div>`}
+${off&&ph!=='done'&&html`<p class="bg-white rounded-2xl p-4 font-bold">Voice needs internet. You can still type and add vitals.</p>`}
+${tr&&html`<div class="rounded-2xl bg-teal-50 border border-teal-200 p-4 space-y-2"><div>Language: <b class="bg-white rounded-full px-3">${tr.dialect}</b></div><p><b>"${tr.statement}"</b></p><p>English: ${tr.translation}</p>
+${tr.mode==='ambiguous'&&tr.alternatives&&html`<div class="bg-amber-100 rounded-xl p-3 space-y-2"><b>Not sure what the patient said. Which one is right?</b>${tr.alternatives.map((a,i)=>html`<button key=${i} onClick=${()=>pickAlt(a)} class="w-full text-left rounded-xl bg-white p-3">${a.translation}</button>`)}</div>`}
+${Object.entries(fua).map(([qn,a])=>html`<p key=${qn} class="border-l-4 border-teal-700 pl-3">+ ${a.translation} <span class="text-base text-slate-600">(${qn})</span></p>`)}
+<p class="text-slate-700">Summary: ${tr.conclusion}</p>
+${!ok&&html`<div class="grid grid-cols-2 gap-3 pt-2"><${Btn} kind="teal" icon="check" onClick=${()=>setOk(true)}>Correct<//><${Btn} icon="redo" onClick=${()=>{setTr(null);setFu([]);setFua({});setPh('idle')}}>Record Again<//></div>`}</div>`}
+${tr&&html`<div class="space-y-3"><h2 class="text-xl font-bold">Follow-up questions</h2><p class="text-slate-700">Ask to learn more. Tap the mic to add the answer to the translation.</p>
+<div class="cols space-y-3">${fu.map(f=>{const a=fua[f.en];const r=rq&&rq.q===f.en;return html`<div key=${f.en} class=${`bg-white rounded-2xl shadow-sm p-3 space-y-2 ${a?'border-l-8 border-teal-700':''}`}>
+<div class="flex items-start gap-2"><div class="flex-1"><b class="block">${f.en}</b>${lang!=='en'&&f[lang]&&html`<span class="text-slate-700">${f[lang]}</span>`}</div>
+<div class="flex gap-2 shrink-0"><button aria-label="Play question" onClick=${()=>play(f.en)} class=${`${IB} bg-slate-200`}><${Icon} n="play" s=${20}/></button>
+<button aria-label=${r?'Stop recording':'Record answer'} disabled=${off||(rq&&!r)} onClick=${()=>tapFu(f.en)} class=${`${IB} ${r?'bg-rose-600 text-white rec':'bg-teal-700 text-white'}`}><${Icon} n=${r?'stop':'mic'} s=${20}/></button></div></div>
+${r&&html`<p class="font-bold text-rose-600">Recording ${rq.s}s. Tap stop when done.</p>`}
+${a&&html`<div class="bg-teal-50 rounded-xl p-3 flex items-start gap-2"><div class="flex-1"><p><b>"${a.statement}"</b></p><p>English: ${a.translation}</p></div>
+<button onClick=${()=>dropFu(f.en)} class="h-12 px-3 rounded-xl bg-slate-200 flex items-center gap-1 font-bold shrink-0"><${Icon} n="x" s=${18}/>Cancel</button></div>`}</div>`})}</div></div>`}
+${ph!=='done'&&!skip&&!pt&&html`<${Btn} kind="link" icon="next" onClick=${()=>setSkip(true)}>Skip voice, add patient<//>`}
+${(tr||skip)&&Who()}
+<${Btn} icon="check" off=${!tr} onClick=${()=>finish('translation')}>Save & Done<//>
+<${Btn} kind="teal" h="h-16" right="next" onClick=${async()=>{const t=fullText();setSym(t);let id=enc;if(pt&&tr){const r=await run('Saving…',()=>api('/api/save_encounter',{json:{patient_id:pt.id,encounter_id:enc,stage:'translation',translation:t,dialect:tr.dialect,statement:tr.statement,conclusion:tr.conclusion,tc_actions:tr.tc_actions}}));if(r&&r.encounter_id){id=r.encounter_id;setEnc(id)}}go('assess');if(t)runAssess(t,id)}}>Next: Vitals & Cause<//>
+</div></div>`}
+
+if(sc==='assess'){
+const adj=(k,d,[lo,hi])=>setVit({...vit,[k]:Math.min(hi,Math.max(lo,+(vit[k]+d).toFixed(1)))});
+const toAct=()=>{setReason(dx?'Suspected: '+dx:tri?'Triage Risk: '+tri.tier:'');go('act')};
+b=html`<div><${Top} title="Vitals & Cause" step=${1} back="listen" a="POST /api/triage {patient_id?, encounter_id, temp, hr, sys_bp, dia_bp, spo2} (optional) · POST /api/diagnosis {encounter_id, symptoms} → {options}"/><${Off}/>
+<div class=${`px-5 py-4 sticky top-0 z-10 shadow-md font-bold flex items-center gap-3 ${lt?TIER[lt][1]:'bg-slate-300 text-slate-900'}`}><${Icon} n=${lt==='RED'?'alert':'check'} s=${28}/><span class="text-xl">${skipV?'Vitals skipped':lt?TIER[lt][0]+': '+TIER[lt][2]:'Vitals are optional'}</span></div>
+<div class="p-4 sm:p-5 lg:p-8 space-y-4"><${Allergy}/>
+<div class="bg-white rounded-2xl shadow-sm p-4 space-y-2"><label class="font-bold block">What is wrong? Type in English</label>
+<textarea value=${sym} onInput=${e=>setSym(e.target.value)} rows="3" placeholder="Example: headache and fever for 3 days" class="w-full p-4 rounded-2xl bg-slate-200 outline-none placeholder-slate-600"/>
+${tr&&html`<p class="text-base text-slate-600">Brought in from the translation. You can edit it.</p>`}</div>
+<div class="flex items-center justify-between gap-3"><h2 class="text-xl font-bold">Vitals</h2><button onClick=${()=>{setSkipV(!skipV);setTri(null)}} class="h-12 px-4 rounded-2xl font-bold bg-slate-200 flex items-center gap-2"><${Icon} n=${skipV?'plus':'next'} s=${20}/>${skipV?'Add vitals':'Skip vitals'}</button></div>
+${skipV?html`<p class="bg-white rounded-2xl p-4">Vitals skipped. You can still get possible causes.</p>`:html`<div class="space-y-3">${lt&&lt!=='GREEN'&&html`<p class="font-bold">${tr2.join(', ')}</p>`}
+${VS.map(([k,l,u,i,st,s0])=>html`<div key=${k} class="bg-white rounded-2xl shadow-sm p-3"><div class="flex items-center gap-2 font-bold mb-2"><${Icon} n=${i} c="text-teal-700"/>${l}${tr&&voiceV[k]!=null&&voiceV[k]===vit[k]&&html`<span class="font-normal text-base text-slate-600">from voice</span>`}</div>
+${vit[k]==null?html`<${Btn} icon="plus" onClick=${()=>setVit({...vit,[k]:s0})}>Measured: add ${l}<//>`:html`<div class="grid grid-cols-3 gap-2 items-center"><${Btn} icon="minus" onClick=${()=>adj(k,-st,LIM[k])}>Less<//><div class="text-center text-3xl font-bold">${vit[k]}<span class="text-base text-slate-600">${u}</span></div><${Btn} icon="plus" onClick=${()=>adj(k,st,LIM[k])}>More<//></div>
+<${Btn} kind="link" icon="x" cls="mt-1" onClick=${()=>{const v={...vit};delete v[k];setVit(v)}}>Not measured<//>`}</div>`)}</div>`}
+<${Btn} kind=${ran?'grey':'teal'} h="h-16" icon="search" onClick=${()=>runAssess()}>${ran?'Update Tier & Causes':'Find Possible Causes'}<//>
+${ran&&html`<div class="space-y-4">
+${tri&&html`<div class=${`rounded-2xl p-4 font-bold ${TIER[tri.tier][1]}`}>${TIER[tri.tier][0]}: ${tri.trigger}</div>`}
+<div class="bg-white rounded-3xl shadow-md p-5 space-y-3"><label class="font-bold text-xl block">Diagnosis</label>
+<input value=${dx} onInput=${e=>setDx(e.target.value)} placeholder="Type a diagnosis" class="w-full h-16 px-4 rounded-2xl bg-slate-200 outline-none placeholder-slate-600"/>
+<p class="text-base text-slate-600">Suggested automatically. Keep it or change it.</p></div>
+<h2 class="text-xl font-bold">Possible causes</h2>
+${!opts.length&&html`<p class="bg-white rounded-2xl p-4 font-bold">No suggestions right now. You can still type a diagnosis above.</p>`}
+<div class="cols space-y-4">${opts.map((c,i)=>html`<div key=${c.name} class=${`bg-white rounded-3xl shadow-md p-5 space-y-2 ${dx===c.name?'ring-4 ring-teal-700':''}`}><div class="font-bold text-xl">${i+1}. ${c.name}</div>
+${c.why&&html`<p><b>Why:</b> ${c.why}</p>`}${c.meds&&html`<p><b>Treat:</b> ${c.meds}</p>`}${c.adm&&html`<p><b>Hospital:</b> ${c.adm}</p>`}
+<${Btn} kind="teal" h="h-16" icon="check" onClick=${()=>{setCause(c);setDx(c.name)}}>${dx===c.name?'Selected':'Select this cause'}<//></div>`)}</div></div>`}
+${Who()}
+<${Btn} kind="teal" h="h-16" right="next" onClick=${toAct}>Next: What to do<//>
+<${Btn} icon="check" onClick=${()=>finish('diagnosis')}>Save & Done<//>
+</div></div>`}
+
+if(sc==='act'){const g=tri&&tri.tier==='GREEN';
+const refer=html`<${Btn} key="r" kind=${tri&&tri.tier==='RED'?'rose':g?'grey':'teal'} h="h-20" icon="hospital" big="text-xl" onClick=${()=>{setRet('act');go('refer')}}>Send to Hospital<//>`;
+const treat=html`<${Btn} key="t" kind=${g?'teal':'grey'} h="h-20" icon="user" big="text-xl" onClick=${()=>go('treat')}>Treat Here<//>`;
+b=html`<div><${Top} title="What to do" step=${2} back="assess"/><div class="p-4 sm:p-5 lg:p-8 space-y-4">
+<div class="bg-white rounded-2xl shadow-sm p-4 space-y-2"><div class="font-bold">${dx||'Diagnosis not set'}</div>${tri&&html`<div class="flex items-center gap-2"><${Chip} t=${tri.tier}/><span>${TIER[tri.tier][2]}</span></div>`}${tri&&html`<p class="text-slate-700">${tri.notes}</p>`}</div>
+${g?[treat,refer]:[refer,treat]}</div></div>`}
+
+if(sc==='treat') b=html`<div><${Top} title="Tell the Patient" back="act" a="POST /api/tts_instruction {text ≤500, language: en|ha|pcm} → {audio_url, translated_text}"/><${Off}/>
+<div class="p-4 sm:p-5 lg:p-8 space-y-3"><${Allergy}/><${Lang}/>
+<div class="cols space-y-3">${PH.slice(1).map(x=>html`<${Btn} key=${x.en} icon="volume" h="min-h-[64px] py-2" onClick=${()=>play(x.en)}>${x.en}<//>`)}</div>
+${Who()}<${Btn} kind="teal" h="h-16" icon="check" onClick=${()=>finish('treatment')}>Save & Done<//></div></div>`;
+
+if(sc==='refer'||sc==='emerg'){const E=sc==='emerg';
+const go2=async()=>{if(!cid)return say('Choose a hospital');let p=pt;
+if(!p){p=await run('Saving patient',()=>api('/api/patients',{json:{full_name:em}}));if(!p)return;setPt(p)}
+if(!reason.trim())return say('Tap why, or type it');
+if(off){setQueued(queued+1);say('Saved on phone. Code is made when signal returns.');return go('home')}
+const r=await run('Making code…',()=>api('/api/referral',{json:{patient_id:p.id,encounter_id:enc,center_id:cid,reason:reason.trim()}}));if(r){setTicket(r);go('code')}};
+b=html`<div><${Top} title=${E?'Emergency Referral':'Send to Hospital'} back=${E||ret==='home'?'home':'act'} a="GET /api/centers · POST /api/referral {patient_id, encounter_id, center_id, reason} → {referral_code, referral_qr, facility}"/><${Off}/>
+<div class="p-4 sm:p-5 lg:p-8 space-y-4">
+${(E||!pt)&&html`<label class="h-16 bg-slate-200 rounded-2xl flex items-center gap-3 px-4"><${Icon} n="user"/><input value=${em} onInput=${e=>setEm(e.target.value)} placeholder="Patient name (only name needed)" class="flex-1 h-full bg-transparent outline-none placeholder-slate-600"/></label>`}
+<${Allergy}/><h2 class="text-xl font-bold">Choose hospital</h2>
+<div class="cols space-y-3">${fac.map(f=>html`<button key=${f.id} onClick=${()=>setCid(f.id)} class=${`w-full min-h-[68px] rounded-2xl px-4 py-3 flex items-center gap-3 text-left font-bold ${cid===f.id?'bg-white ring-4 ring-teal-700 shadow-md':'bg-slate-200'}`}><${Icon} n=${cid===f.id?'check':'hospital'}/><span class="flex-1">${f.name}<span class="block font-normal text-base text-slate-700">${f.location}</span></span></button>`)}</div>
+<h2 class="text-xl font-bold">Why? Tap all that apply</h2>
+<div class="grid grid-cols-2 gap-2">${CHIPS.map(c=>html`<button key=${c} onClick=${()=>setReason(r=>r.includes(c)?r:(r?r+'; ':'')+c)} class=${`min-h-14 px-2 rounded-2xl font-bold flex items-center justify-center gap-2 ${reason.includes(c)?'bg-slate-900 text-white':'bg-slate-200'}`}>${reason.includes(c)&&html`<${Icon} n="check" s=${18}/>`}${c}</button>`)}</div>
+<textarea value=${reason} onInput=${e=>setReason(e.target.value)} rows="2" placeholder="Reason" class="w-full p-4 rounded-2xl bg-slate-200 outline-none placeholder-slate-600"/>
+<${Btn} kind=${E||(tri&&tri.tier==='RED')?'rose':'teal'} h="h-20" icon="qr" big="text-xl" onClick=${go2}>Make Referral Code<//>
+</div></div>`}
+
+if(sc==='code'&&ticket){const cells=Array.from({length:81},(_,i)=>((i*7+i%9*3+Math.floor(i/9)*5)%3===0)||[0,1,9,10,7,8,16,17,63,64,72,73].includes(i));
+b=html`<div><${Top} title="Referral Code" back="home"/><div class="p-4 sm:p-5 lg:p-8 space-y-4 text-center">
+<div class="bg-white rounded-3xl shadow-md p-6 space-y-4">${ticket.referral_qr?html`<img src=${ticket.referral_qr} alt="QR" class="mx-auto w-52 h-52"/>`:html`<div class="mx-auto w-52 h-52 grid grid-cols-9 gap-0.5 p-2 border-4 border-slate-900 rounded-xl">${cells.map((c,i)=>html`<span key=${i} class=${c?'bg-slate-900':'bg-white'}/>`)}</div>`}
+<div class="text-4xl font-bold tracking-widest font-mono">${ticket.referral_code}</div><p>${pt&&pt.full_name} to ${ticket.facility}</p><p class="text-base text-slate-600">Saved to the patient's record.</p></div>
+<div class="noprint space-y-3"><${Btn} icon="volume" onClick=${()=>play('Code '+ticket.referral_code.split('').join(' '))}>Read Code Aloud<//><${Btn} icon="print" onClick=${()=>window.print()}>Print Slip<//>
+<${Btn} kind="teal" h="h-16" icon="home" onClick=${()=>go('home')}>Done<//></div></div></div>`}
+
+if(sc==='lookup'){const go3=async()=>{const r=await run('Looking up…',()=>api('/api/lookup',{json:{code:lk.trim()}}));if(r)setLr(r)};
+b=html`<div><${Top} title="Receive Referral" back="home" a="POST /api/lookup {code} → {patient, encounter_id, triage_tier, reason, diagnosis, vitals} (receive_referral copies the record here)"/><${Off}/>
+<div class="p-4 sm:p-5 lg:p-8 space-y-4"><label class="h-16 bg-slate-200 rounded-2xl flex items-center gap-3 px-4"><${Icon} n="qr"/><input value=${lk} onInput=${e=>setLk(e.target.value.toUpperCase())} placeholder="Code, e.g. MU-D457AJ" class="flex-1 h-full bg-transparent outline-none font-mono font-bold uppercase placeholder-slate-600"/></label>
+<${Btn} kind="teal" h="h-16" icon="search" onClick=${go3}>Look Up<//>
+${lr&&html`<div class="bg-white rounded-3xl shadow-md p-5 space-y-3"><div class="flex items-center justify-between"><b class="text-xl">${lr.patient_name}</b>${lr.triage_tier&&html`<${Chip} t=${lr.triage_tier}/>`}</div>
+<p class="text-slate-700">From ${lr.from_facility}</p><p><b>Reason:</b> ${lr.reason}</p>${lr.diagnosis&&html`<p><b>Cause:</b> ${lr.diagnosis}</p>`}<p>Temp ${lr.vitals.temp!=null?lr.vitals.temp+'°C':'—'} | Oxygen ${lr.vitals.spo2!=null?lr.vitals.spo2+'%':'—'}</p>
+<${Btn} kind="teal" h="h-16" right="next" onClick=${()=>{reset();setPt(lr.patient);setEnc(lr.encounter_id);setTri(lr.triage_tier?{tier:lr.triage_tier,trigger:'',notes:''}:null);setDx(lr.diagnosis||'');setSym(lr.reason||'');const nv={};for(const k in LIM)if(lr.vitals&&lr.vitals[k]!=null)nv[k]=+lr.vitals[k];setVit(nv);go('assess')}}>Continue: Vitals & Cause<//></div>`}
+</div></div>`}
+
+return html`<main class="w-full max-w-md sm:max-w-2xl lg:max-w-4xl mx-auto bg-white min-h-[100dvh] shadow-xl"><div class="bg-slate-50 min-h-[100dvh] pb-10">${b}</div>
+${busy&&html`<div class="noprint fixed top-4 left-1/2 -translate-x-1/2 bg-slate-900 text-white rounded-2xl px-5 py-3 shadow-md font-bold flex items-center gap-3 z-30"><${Icon} n="loader" c="spin"/><span>${busy}</span></div>`}
+${toast&&html`<div class="noprint fixed bottom-6 left-4 right-4 max-w-md mx-auto bg-slate-900 text-white rounded-2xl px-5 py-4 shadow-md font-bold flex items-center gap-2 z-30"><${Icon} n="alert"/><span>${toast}</span></div>`}</main>`;
+}
+ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
+</script><!--{% endraw %}-->
+</body>
+</html>
