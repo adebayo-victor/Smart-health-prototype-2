@@ -120,8 +120,8 @@ app.session_interface = AutoSecureSession()
 
 # gemini-1.5-flash and gemini-2.0-flash have been retired by Google, so these defaults point at a
 # current model. Check https://ai.google.dev/gemini-api/docs/models and override with env vars if needed.
-LLM_MODEL = os.getenv("LLM_MODEL", "gemini/gemini-3.6-flash")   # LiteLLM analysis (stage 3)
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")    # direct Gemini SDK translation (stage 2)
+LLM_MODEL = os.getenv("LLM_MODEL", "gemini/gemini-2.5-flash")   # LiteLLM analysis (stage 3)
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")    # direct Gemini SDK translation (stage 2)
 STAGES = ["translation", "triage", "diagnosis", "referral"]
 
 
