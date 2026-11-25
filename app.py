@@ -6,9 +6,10 @@ Flow of a patient encounter:
 Pipeline for intake:
     Whisper (Groq) transcribes  ->  Gemini translates  ->  LiteLLM analyzes (TC / vitals / dialect)
 
-v4 CHW single-page app (templates/chw_app.html, served at /chw-app) talks to these routes. Every stage can run on
+v5 CHW single-page app (templates/chw_app.html, served at /chw-app) talks to these routes. Every stage can run on
 its own: triage and diagnosis work without a patient (nothing is stored), and /api/save_encounter writes any
-stage, or the whole visit, to a patient's record when the worker is done.
+stage, or the whole visit, to a patient's record when the worker is done. /api/referral now accepts the same
+clinical fields, so a referral always carries the visit's translation, vitals, triage and diagnosis with it.
 """
 import base64
 import hmac
@@ -23,7 +24,8 @@ import string
 import tempfile
 import time
 import traceback
-from datetime import datetime, timezone
+from collections import OrderedDict
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 
 import qrcode
@@ -171,6 +173,7 @@ class Patient(db.Model):
     allergies = db.Column(db.Text, nullable=True)
     source_patient_id = db.Column(db.Integer, db.ForeignKey("patient.id"), nullable=True)
     merged_into_id = db.Column(db.Integer, db.ForeignKey("patient.id"), nullable=True)
+    merge_log = db.Column(db.Text, nullable=True)   # JSON: what a merge moved, so undo-merge can put it back
     is_active = db.Column(db.Boolean, nullable=False, default=True)
     created_by_worker_id = db.Column(db.Integer, db.ForeignKey("worker.id"), nullable=True)
     created_at = db.Column(db.DateTime, default=utcnow)
@@ -216,6 +219,7 @@ class Encounter(db.Model):
     origin_worker_id = db.Column(db.Integer, db.ForeignKey("worker.id"), nullable=True)
     origin_facility_id = db.Column(db.Integer, db.ForeignKey("medical_center.id"), nullable=True)
     destination_facility_id = db.Column(db.Integer, db.ForeignKey("medical_center.id"), nullable=True)
+    # pending | fulfilled | revoked (cancelled by the patient) | cancelled (cancelled by the sending worker)
     referral_status = db.Column(db.String(20), default="pending")
     current_stage = db.Column(db.String(20), default="translation")
     status = db.Column(db.String(20), default="active")
@@ -275,10 +279,16 @@ class Phrase(db.Model):
 # ==========================================
 # 3. INITIALIZATION & DEMO DATA
 # ==========================================
+DEFAULT_SEED_PASSWORD = "password123"
+
+
 def seed_demo_data():
     if MedicalCenter.query.count():
         return
-    password = os.getenv("SEED_PASSWORD", "password123")
+    password = os.getenv("SEED_PASSWORD", DEFAULT_SEED_PASSWORD)
+    if password == DEFAULT_SEED_PASSWORD:
+        logger.warning("Demo workers were created with the DEFAULT password. Set SEED_PASSWORD, or change these "
+                       "passwords before real patients are entered.")
     mu = MedicalCenter(name="Murtala Muhammed Specialist Hospital", location="Kano", short_code="MU")
     ak = MedicalCenter(name="Aminu Kano Teaching Hospital", location="Kano", short_code="AK")
     db.session.add_all([mu, ak])
@@ -313,24 +323,28 @@ def seed_phrases():
     db.session.commit()
 
 
-def ensure_columns():
+def add_missing_columns(table, wanted):
     """db.create_all() creates missing TABLES but never adds columns to an existing one.
-    Add the new Encounter columns on databases created before this change (SQLite and PostgreSQL)."""
-    wanted = {"companion_user_id": "INTEGER", "pass_hospitals": "TEXT", "pass_location": "VARCHAR(100)"}
+    Add new columns on databases created before they existed (SQLite and PostgreSQL)."""
     try:
-        have = {c["name"] for c in sa_inspect(db.engine).get_columns("encounter")}
+        have = {c["name"] for c in sa_inspect(db.engine).get_columns(table)}
     except Exception:
-        logger.exception("Could not inspect the encounter table")
+        logger.exception("Could not inspect the %s table", table)
         return
     for name, ddl in wanted.items():
         if name in have:
             continue
         try:
-            db.session.execute(sql_text(f"ALTER TABLE encounter ADD COLUMN {name} {ddl}"))
+            db.session.execute(sql_text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
             db.session.commit()
-            logger.info("Added encounter.%s", name)
+            logger.info("Added %s.%s", table, name)
         except Exception:  # another gunicorn worker may have added it a moment ago
             db.session.rollback()
+
+
+def ensure_columns():
+    add_missing_columns("encounter", {"companion_user_id": "INTEGER", "pass_hospitals": "TEXT", "pass_location": "VARCHAR(100)"})
+    add_missing_columns("patient", {"merge_log": "TEXT"})
     try:
         db.session.execute(sql_text("CREATE INDEX IF NOT EXISTS ix_encounter_companion_user_id ON encounter (companion_user_id)"))
         db.session.commit()
@@ -353,9 +367,7 @@ _llm = None
 
 # ---- Gemini (direct SDK): the translator ----
 _GEMINI_KEY = os.getenv("GEMINI_API_KEY")
-# FIX: this used to start as the string "gemini-2.5-flash". With no key (or no SDK) it stayed a string, so
-# `gemini_model is None` was never true and every translation tried "str".generate_content() and logged an error
-# before falling back. None now means "Gemini unavailable" exactly as the callers expect.
+# None means "Gemini unavailable" exactly as the callers expect.
 gemini_model = None
 _GEMINI_SAFETY = None
 if not _GEMINI_KEY:
@@ -389,6 +401,28 @@ WHISPER_GHOSTS = {
 }
 # What the browser may send as "language". Pidgin has no Whisper code; English works best for it.
 STT_LANGS = {"en": "en", "pcm": "en", "ha": "ha"}
+
+# ---- Small in-memory caches. The same instructions are played to patients over and over, so a repeat tap
+# should be instant and should not cost another Gemini + gTTS round trip. Only successes are cached. ----
+_CACHE_MAX = 80
+_tts_cache = OrderedDict()
+_tr_cache = OrderedDict()
+
+
+def _cache_get(cache, key):
+    val = cache.get(key)
+    if val is not None:
+        cache.move_to_end(key)
+    return val
+
+
+def _cache_put(cache, key, val):
+    if val is None:
+        return
+    cache[key] = val
+    cache.move_to_end(key)
+    while len(cache) > _CACHE_MAX:
+        cache.popitem(last=False)
 
 
 def get_groq():
@@ -625,10 +659,16 @@ def transcribe(audio_file, language=None, prompt=STT_PROMPT_CLINIC):
 
 
 def speak(text, lang="en"):
+    key = (lang, text)
+    cached = _cache_get(_tts_cache, key)
+    if cached:
+        return cached
     try:
         buf = io.BytesIO()
         gTTS(text=text, lang=lang, slow=False).write_to_fp(buf)
-        return "data:audio/mp3;base64," + base64.b64encode(buf.getvalue()).decode("utf-8")
+        uri = "data:audio/mp3;base64," + base64.b64encode(buf.getvalue()).decode("utf-8")
+        _cache_put(_tts_cache, key, uri)
+        return uri
     except Exception:
         logger.exception("gTTS failed")
         return None
@@ -884,7 +924,40 @@ def security_headers(resp):
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
     resp.headers.setdefault("Referrer-Policy", "same-origin")
     resp.headers.setdefault("Permissions-Policy", "microphone=(self)")
+    if request.path.startswith("/api/"):
+        # Patient data and tokens must never be served from a stale browser or service-worker cache.
+        resp.headers["Cache-Control"] = "no-store"
     return resp
+
+
+# Clean JSON errors for the apps, so a too-large upload or a bad URL shows a readable message, not an HTML page.
+@app.errorhandler(413)
+def too_large(e):
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "That recording is too large. Keep recordings under 2 minutes."}), 413
+    return "File too large", 413
+
+
+@app.errorhandler(404)
+def not_found(e):
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "Not found."}), 404
+    return e
+
+
+@app.errorhandler(405)
+def bad_method(e):
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "That action is not allowed here."}), 405
+    return e
+
+
+@app.errorhandler(500)
+def server_error(e):
+    db.session.rollback()
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "Something went wrong on the server. Please try again."}), 500
+    return "Something went wrong. Please try again.", 500
 
 
 _attempts = {}
@@ -930,6 +1003,59 @@ def compute_triage(v):
     return "GREEN", ["All vitals within expected range"], "Routine care. Explain danger signs to patient."
 
 
+def apply_clinical(enc, data, stage="translation"):
+    """Write whatever clinical fields the worker has so far onto an encounter. Used by /api/save_encounter and by
+    /api/referral, so a referral always carries the visit's translation, vitals, triage and diagnosis.
+
+    The triage tier is worked out HERE from the vitals whenever there are any, so a stale tier sent by the phone can
+    never disagree with the readings. With no vitals at all, the tier the worker already saw is kept."""
+    translation = str(data.get("translation") or "").strip()[:5000]
+    statement = str(data.get("statement") or "").strip()[:5000]
+    symptoms = str(data.get("symptoms") or "").strip()[:2000]
+    if translation:
+        enc.translation = translation
+    if statement:
+        enc.statement = statement
+    elif symptoms and not enc.statement:
+        enc.statement = symptoms
+    if data.get("dialect"):
+        enc.dialect = str(data["dialect"])[:50]
+    if data.get("conclusion") or data.get("tc_actions"):
+        enc.tc_steps_translation = json.dumps({
+            "conclusion": data.get("conclusion"),
+            "summary": data.get("tc_summary") or "Unconfirmed",
+            "actions": data.get("tc_actions") or [],
+        })
+
+    vitals = {}
+    for key, (low, high) in VITAL_LIMITS.items():
+        v = to_float((data.get("vitals") or {}).get(key))
+        if v is not None and low <= v <= high:
+            vitals[key] = v
+    if vitals and data.get("vitals_replace"):
+        enc.vitals_json = json.dumps(vitals)      # the worker removed or changed readings: the screen is the truth
+    elif vitals:
+        merge_vitals(enc, vitals)
+
+    client_tier = str(data.get("tier") or "").upper()
+    current = json.loads(enc.vitals_json) if enc.vitals_json else {}
+    if current and (vitals or client_tier):
+        enc.triage_tier, _, enc.triage_notes = compute_triage(current)
+        advance_stage(enc, "triage")
+    elif client_tier in ("RED", "YELLOW", "GREEN"):
+        enc.triage_tier = client_tier
+        advance_stage(enc, "triage")
+
+    diagnosis_text = str(data.get("diagnosis") or "").strip()[:500]
+    if diagnosis_text:
+        enc.diagnosis_notes = diagnosis_text
+        enc.diagnosis_medications = str(data.get("medications") or "").strip()[:1000] or enc.diagnosis_medications
+        advance_stage(enc, "diagnosis")
+    if stage == "treatment" and enc.status != "referred":
+        enc.status = "treated"
+    return enc
+
+
 # ==========================================
 # 6. PAGE ROUTES
 # ==========================================
@@ -943,7 +1069,9 @@ def home():
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
-        ip = request.headers.get("X-Forwarded-For", request.remote_addr or "").split(",")[0].strip()
+        # ProxyFix has already applied the trusted X-Forwarded-For hop to remote_addr. Reading the raw header here
+        # would let anyone dodge the throttle by sending a made-up one.
+        ip = request.remote_addr or ""
         if login_throttled(ip):
             return render_template("login.html", error="Too many attempts. Wait 10 minutes."), 429
         username = (request.form.get("username") or "").strip()
@@ -1004,7 +1132,7 @@ def lookup_page():
 @app.route("/chw-app")
 @login_required
 def chw_app():
-    """The v4 single-page CHW app (templates/chw_app.html). It reads its CSRF token from a <meta> tag."""
+    """The v5 single-page CHW app (templates/chw_app.html). It reads its CSRF token from a <meta> tag."""
     return render_template("chw_app.html")
 
 
@@ -1028,6 +1156,14 @@ def service_worker():
     resp = send_from_directory(app.static_folder, "sw.js", mimetype="application/javascript")
     resp.headers["Cache-Control"] = "no-cache"
     return resp
+
+
+@app.route("/api/csrf")
+def api_csrf():
+    """A fresh CSRF token for the current session. The CHW app calls this once if a request is refused because the
+    page it is running was served from an old cache with an old token, then retries, so the worker never has to
+    reload and lose what they typed."""
+    return jsonify({"token": session.get("csrf", "")})
 
 
 @app.route("/dashboard")
@@ -1058,7 +1194,7 @@ def dashboard():
 
     pagination = query.order_by(Encounter.created_at.desc()).paginate(page=page, per_page=20, error_out=False)
     counts = dict(db.session.query(Encounter.triage_tier, func.count()).filter(scope).group_by(Encounter.triage_tier).all())
-    
+
     incoming_q = Encounter.query.filter_by(destination_facility_id=facility_id, referral_status="pending")
     incoming = incoming_q.order_by(Encounter.updated_at.desc()).limit(15).all()
 
@@ -1069,8 +1205,8 @@ def dashboard():
 
     return render_template(
         "dashboard.html",
-        pagination=pagination, 
-        encounters=pagination.items, 
+        pagination=pagination,
+        encounters=pagination.items,
         incoming=incoming,
         sent_referrals=sent_referrals,
         facility_centers={c.id: c.name for c in MedicalCenter.query.all()},
@@ -1086,7 +1222,7 @@ def dashboard():
 @app.route("/api/dashboard")
 @login_required
 def api_dashboard():
-    """JSON twin of /dashboard for the v4 home screen: tier counts, referrals coming in, patients needing attention."""
+    """JSON twin of /dashboard for the v5 home screen: tier counts, referrals coming in, patients needing attention."""
     facility_id = session["facility_id"]
     scope = db.and_(Encounter.facility_id == facility_id,
                     db.or_(Encounter.referral_status.is_(None), Encounter.referral_status != "revoked"))
@@ -1113,12 +1249,31 @@ def api_dashboard():
             break
 
     return jsonify({
-        "worker": {"name": session.get("worker_name"), "facility": session.get("facility_name")},
+        "worker": {"name": session.get("worker_name"), "facility": session.get("facility_name"),
+                   "facility_id": facility_id},
         "stats": {"RED": counts.get("RED", 0), "YELLOW": counts.get("YELLOW", 0), "GREEN": counts.get("GREEN", 0),
                   "incoming": incoming_q.count()},
         "incoming": incoming,
         "attention": attention,
     })
+
+
+@app.route("/api/referrals")
+@login_required
+def api_referrals():
+    """Referrals this facility has SENT, newest first, with their status, so a worker can see whether the patient
+    has been received and can cancel one made by mistake. Companion self-referral passes are not listed."""
+    rows = (Encounter.query.filter(Encounter.facility_id == session["facility_id"],
+                                   Encounter.referral_code.isnot(None),
+                                   Encounter.companion_user_id.is_(None),
+                                   db.or_(Encounter.referral_status.is_(None), Encounter.referral_status != "revoked"))
+            .order_by(Encounter.created_at.desc()).limit(15).all())
+    return jsonify([{
+        "id": e.id, "referral_code": e.referral_code, "patient_name": e.patient_name,
+        "to_facility": e.referral_facility, "status": e.referral_status or "pending",
+        "triage_tier": e.triage_tier, "reason": e.referral_reason,
+        "date": e.created_at.strftime("%d %b %Y, %I:%M %p") if e.created_at else "",
+    } for e in rows])
 
 
 @app.route("/api/phrases")
@@ -1136,8 +1291,9 @@ def api_phrases():
 @app.route("/api/centers")
 @login_required
 def get_centers():
+    here = session.get("facility_id")
     return jsonify([
-        {"id": c.id, "name": c.name, "location": c.location, "short_code": c.short_code}
+        {"id": c.id, "name": c.name, "location": c.location, "short_code": c.short_code, "current": c.id == here}
         for c in MedicalCenter.query.order_by(MedicalCenter.name).all()
     ])
 
@@ -1229,7 +1385,8 @@ def get_patient(patient_id):
     return jsonify({**patient.to_dict(), "encounters": [{
         "id": e.id, "date": e.created_at.strftime("%d %b %Y, %I:%M %p"), "triage_tier": e.triage_tier,
         "stage": "treatment" if e.status == "treated" else e.current_stage,
-        "diagnosis": e.diagnosis_notes, "referral_code": e.referral_code,
+        "diagnosis": e.diagnosis_notes, "referral_code": e.referral_code, "referral_status": e.referral_status,
+        "referral_facility": e.referral_facility, "medications": e.diagnosis_medications,
     } for e in history]})
 
 
@@ -1578,47 +1735,7 @@ def save_encounter():
 
     enc = enc or new_encounter(patient)
     attach_patient(enc, patient)
-
-    translation = str(data.get("translation") or "").strip()[:5000]
-    statement = str(data.get("statement") or "").strip()[:5000]
-    symptoms = str(data.get("symptoms") or "").strip()[:2000]
-    if translation:
-        enc.translation = translation
-    if statement:
-        enc.statement = statement
-    elif symptoms and not enc.statement:
-        enc.statement = symptoms
-    if data.get("dialect"):
-        enc.dialect = str(data["dialect"])[:50]
-    if data.get("conclusion") or data.get("tc_actions"):
-        enc.tc_steps_translation = json.dumps({
-            "conclusion": data.get("conclusion"),
-            "summary": data.get("tc_summary") or "Unconfirmed",
-            "actions": data.get("tc_actions") or [],
-        })
-
-    vitals = {}
-    for key, (low, high) in VITAL_LIMITS.items():
-        v = to_float((data.get("vitals") or {}).get(key))
-        if v is not None and low <= v <= high:
-            vitals[key] = v
-    if vitals:
-        merge_vitals(enc, vitals)
-
-    tier = str(data.get("tier") or "").upper()
-    if tier in ("RED", "YELLOW", "GREEN"):
-        enc.triage_tier = tier
-        if vitals:
-            enc.triage_notes = compute_triage(json.loads(enc.vitals_json))[2]
-        advance_stage(enc, "triage")
-
-    diagnosis_text = str(data.get("diagnosis") or "").strip()[:500]
-    if diagnosis_text:
-        enc.diagnosis_notes = diagnosis_text
-        enc.diagnosis_medications = str(data.get("medications") or "").strip()[:1000] or enc.diagnosis_medications
-        advance_stage(enc, "diagnosis")
-    if stage == "treatment" and enc.status != "referred":
-        enc.status = "treated"
+    apply_clinical(enc, data, stage)
 
     db.session.commit()
     return jsonify({"status": "saved", "encounter_id": enc.id, "patient_id": patient.id, "patient_name": patient.full_name})
@@ -1636,10 +1753,10 @@ def tts_instruction():
     target_text = text
     if language != "en":
         lang_name = {"ha": "Hausa", "pcm": "Nigerian Pidgin"}.get(language, "Hausa")
-        # Gemini first; the LiteLLM model is the fallback.
-        row = Phrase.query.filter_by(text_en=text).first()   # a stored, checked translation beats a live one
+        # A stored, checked translation beats a live one; Gemini next; the LiteLLM model is the fallback.
+        row = Phrase.query.filter_by(text_en=text).first()
         stored = (row.text_ha if language == "ha" else row.text_pcm) if row else None
-        translated = stored or gemini_translate(text, lang_name)
+        translated = stored or _cache_get(_tr_cache, (lang_name, text)) or gemini_translate(text, lang_name)
         if translated:
             target_text = translated
         else:
@@ -1650,6 +1767,8 @@ def tts_instruction():
                 ], 0.3)
             except Exception:
                 logger.exception("Instruction translation failed; using original text")
+        if target_text != text:
+            _cache_put(_tr_cache, (lang_name, text), target_text)
 
     audio = speak(target_text, "ha" if language == "ha" else "en")
     if not audio:
@@ -1789,15 +1908,23 @@ def api_diagnosis():
 @app.route("/api/referral", methods=["POST"])
 @login_required
 def generate_referral():
+    """Create a referral code. Besides the destination and reason it accepts the same clinical fields as
+    /api/save_encounter (translation, symptoms, vitals, tier, diagnosis, medications), so the hospital that opens the
+    code sees the whole visit even if the worker never pressed Save. With no patient_id it will create the patient
+    from `patient_name`, which is what an emergency referral and a referral queued offline need."""
     data = request.get_json(silent=True) or {}
-    center_id = data.get("center_id")
     reason = (data.get("reason") or "").strip()[:1000]
     enc = get_facility_encounter(data.get("encounter_id")) if data.get("encounter_id") else None
     if data.get("encounter_id") and not enc:
         return fail("Encounter not found.", 404)
     patient = resolve_patient(data, enc)
-    if not patient:
+    new_name = re.sub(r"\s+", " ", str(data.get("patient_name") or "")).strip()[:100]
+    if not patient and len(new_name) < 2:
         return fail("Choose or create a patient first.", 400)
+    try:
+        center_id = int(data.get("center_id"))
+    except (TypeError, ValueError):
+        center_id = None
     if not center_id or not reason:
         return fail("Destination center and reason are required.", 400)
 
@@ -1808,8 +1935,27 @@ def generate_referral():
         return fail("Choose a different center. You are already at this one.", 400)
 
     try:
+        if not patient:
+            patient = Patient(facility_id=session["facility_id"], full_name=new_name, name_key=normalize_name(new_name),
+                              created_by_worker_id=session["worker_id"])
+            db.session.add(patient)
+            db.session.flush()
+        elif not enc:
+            # A retried request (for example one queued offline that reached the server but lost its reply) must not
+            # create a second referral for the same patient, hospital and reason.
+            recent = Encounter.query.filter(
+                Encounter.patient_id == patient.id, Encounter.facility_id == session["facility_id"],
+                Encounter.destination_facility_id == dest.id, Encounter.referral_status == "pending",
+                Encounter.referral_reason == reason, Encounter.created_at > utcnow() - timedelta(minutes=10),
+            ).first()
+            if recent:
+                return jsonify({"encounter_id": recent.id, "referral_code": recent.referral_code,
+                                "referral_qr": recent.referral_qr, "facility": dest.name,
+                                "patient": patient.to_dict(), "patient_name": patient.full_name, "reason": reason})
+
         enc = enc or new_encounter(patient)
         attach_patient(enc, patient)
+        apply_clinical(enc, data)
         code = enc.referral_code if enc.referral_code and enc.destination_facility_id == dest.id \
             else generate_referral_code(dest.short_code)
         enc.referral_reason = reason
@@ -1829,6 +1975,25 @@ def generate_referral():
                     "facility": dest.name, "patient": patient.to_dict(), "patient_name": patient.full_name, "reason": reason})
 
 
+@app.route("/api/referral/<int:encounter_id>/cancel", methods=["POST"])
+@login_required
+def cancel_referral(encounter_id):
+    """The sending worker withdraws a referral made by mistake. The visit stays on the patient's record; only the
+    code stops working. A referral a hospital has already received cannot be cancelled."""
+    enc = get_facility_encounter(encounter_id)
+    if not enc or not enc.referral_code or enc.companion_user_id:
+        return fail("Referral not found.", 404)
+    if enc.referral_status == "fulfilled":
+        return fail("A hospital has already received this patient, so the referral cannot be cancelled.", 409)
+    if enc.referral_status in ("revoked", "cancelled"):
+        return jsonify({"status": enc.referral_status})
+    enc.referral_status = "cancelled"
+    enc.status = "active"
+    enc.current_stage = "diagnosis" if enc.diagnosis_notes else "triage" if enc.triage_tier else "translation"
+    db.session.commit()
+    return jsonify({"status": "cancelled"})
+
+
 @app.route("/api/lookup", methods=["POST"])
 @login_required
 def lookup_patient():
@@ -1843,6 +2008,8 @@ def lookup_patient():
 
     if src.referral_status == "revoked":
         return fail("This referral code was cancelled by the patient and is no longer valid.", 410)
+    if src.referral_status == "cancelled":
+        return fail("This referral code was cancelled by the health worker who sent it and is no longer valid.", 410)
 
     current_fid = session["facility_id"]
     current_fname = session.get("facility_name")
@@ -1901,6 +2068,7 @@ def lookup_patient():
         "triage_notes": src.triage_notes,
         "diagnosis": src.diagnosis_notes,
         "medications": src.diagnosis_medications,
+        "translation": src.translation,
         "vitals": vitals,
         "created_at": src.created_at.strftime("%Y-%m-%d %H:%M") if src.created_at else "",
     })
@@ -2280,9 +2448,10 @@ def patient_voice():
         # helps it; on failure it returns None and the LiteLLM model translates inside its own answer.
         translated = alt_translation = None
         mode = "confident"
+        heard_lang = None
         if COMPANION_PRETRANSLATE:
             stt_lang = COMPANION_STT_LANG if COMPANION_STT_LANG in ("en", "ha") else None
-            options = heard_lang = None
+            options = None
             # Not while a location is awaited: a one-word town name must never be bounced as "unclear".
             if COMPANION_META_REASONING and not pending_active:
                 options, heard_lang = gemini_translation_options(user_text, stt_lang)
@@ -2590,27 +2759,32 @@ def check_patient_duplicates():
             matches.append({**p.to_dict(), "match_reason": f"Same phone number: {phone}"})
             seen_ids.add(p.id)
 
-    # 3. Fuzzy name match (sorted tokens + close age or sex)
+    # 3. Fuzzy name match. The same name always counts; a partly matching name needs a close age or the same sex.
     if name:
-        tokens = normalize_name(name).split()
+        key = normalize_name(name)
+        tokens = key.split()
         if tokens:
+            # Narrow in the database first, so a big facility is not loaded into memory for every new patient.
             candidates = Patient.query.filter(
                 Patient.facility_id == facility_id,
                 Patient.is_active.is_(True),
-                Patient.id.notin_(seen_ids)
-            ).all()
+                Patient.id.notin_(seen_ids),
+                db.or_(*[Patient.name_key.like(f"%{t}%") for t in tokens]),
+            ).limit(200).all()
 
             for c in candidates:
                 c_tokens = set((c.name_key or "").split())
                 overlap = len(set(tokens) & c_tokens)
+                exact = c.name_key == key
                 # If at least 2 tokens match or name is single word and identical
-                if (overlap >= 2) or (len(tokens) == 1 and tokens[0] in c_tokens):
-                    is_close_age = age is not None and c.age_years is not None and abs(c.age_years - age) <= 3
-                    is_same_sex = sex and c.sex and sex == c.sex
-                    
-                    if is_close_age or is_same_sex:
-                        matches.append({**c.to_dict(), "match_reason": f"Similar name and matching age/gender"})
-                        seen_ids.add(c.id)
+                if not (exact or overlap >= 2 or (len(tokens) == 1 and tokens[0] in c_tokens)):
+                    continue
+                is_close_age = age is not None and c.age_years is not None and abs(c.age_years - age) <= 3
+                is_same_sex = bool(sex and c.sex and sex == c.sex)
+                if exact or is_close_age or is_same_sex:
+                    matches.append({**c.to_dict(),
+                                    "match_reason": "Same name" if exact else "Similar name and matching age/gender"})
+                    seen_ids.add(c.id)
 
     return jsonify({"matches": matches[:5]})
 
@@ -2618,13 +2792,14 @@ def check_patient_duplicates():
 @app.route("/api/patients/merge", methods=["POST"])
 @login_required
 def merge_patients():
-    """Combines secondary patient into primary. Reassigns encounters and soft-deletes secondary."""
+    """Combines secondary patient into primary. Reassigns encounters and soft-deletes secondary.
+    What moved is written to secondary.merge_log, so /api/patients/undo-merge can put it all back."""
     data = request.get_json(silent=True) or {}
-    primary_id = data.get("primary_id")
-    secondary_id = data.get("secondary_id")
     facility_id = session["facility_id"]
-
-    if not primary_id or not secondary_id:
+    try:
+        primary_id = int(data.get("primary_id"))
+        secondary_id = int(data.get("secondary_id"))
+    except (TypeError, ValueError):
         return fail("Both primary and secondary patient IDs are required.", 400)
     if primary_id == secondary_id:
         return fail("Cannot merge a patient into themselves.", 400)
@@ -2638,6 +2813,8 @@ def merge_patients():
         return fail("Secondary patient not found or already merged.", 404)
 
     try:
+        log = {"encounter_ids": [e.id for e in Encounter.query.filter_by(patient_id=secondary.id).all()]}
+
         # Reassign all encounters to primary
         Encounter.query.filter_by(patient_id=secondary.id).update({
             "patient_id": primary.id,
@@ -2646,15 +2823,21 @@ def merge_patients():
 
         # Copy any missing demographic info from secondary to primary
         if not primary.phone and secondary.phone: primary.phone = secondary.phone
-        if not primary.hospital_id and secondary.hospital_id: primary.hospital_id = secondary.hospital_id
         if not primary.age_years and secondary.age_years: primary.age_years = secondary.age_years
         if not primary.sex and secondary.sex: primary.sex = secondary.sex
         if not primary.village_lga and secondary.village_lga: primary.village_lga = secondary.village_lga
         if not primary.allergies and secondary.allergies: primary.allergies = secondary.allergies
+        # A hospital ID is unique per facility, so it must LEAVE the secondary record before the primary can hold it.
+        if not primary.hospital_id and secondary.hospital_id:
+            log["hospital_id"] = secondary.hospital_id
+            secondary.hospital_id = None
+            db.session.flush()          # free the unique ID first, then hand it to the primary
+            primary.hospital_id = log["hospital_id"]
 
         # Soft-delete secondary record and point to primary
         secondary.is_active = False
         secondary.merged_into_id = primary.id
+        secondary.merge_log = json.dumps(log)
 
         db.session.commit()
         return jsonify({
@@ -2670,7 +2853,7 @@ def merge_patients():
 @app.route("/api/patients/undo-merge/<int:secondary_id>", methods=["POST"])
 @login_required
 def undo_merge(secondary_id):
-    """Reverses an accidental merge."""
+    """Reverses an accidental merge: the visits that moved go back, and so does the hospital ID."""
     facility_id = session["facility_id"]
     secondary = db.session.get(Patient, secondary_id)
 
@@ -2680,14 +2863,29 @@ def undo_merge(secondary_id):
         return fail("This patient record is not in a merged state.", 400)
 
     try:
-        primary_id = secondary.merged_into_id
+        primary = db.session.get(Patient, secondary.merged_into_id)
+        try:
+            log = json.loads(secondary.merge_log) if secondary.merge_log else {}
+        except (TypeError, ValueError):
+            log = {}
+        ids = [i for i in log.get("encounter_ids", []) if isinstance(i, int)]
+        if ids and primary:
+            Encounter.query.filter(Encounter.id.in_(ids), Encounter.patient_id == primary.id).update(
+                {"patient_id": secondary.id, "patient_name": secondary.full_name}, synchronize_session=False)
+        hid = log.get("hospital_id")
+        if hid and primary and primary.hospital_id == hid:
+            primary.hospital_id = None
+            db.session.flush()          # free the unique ID first, then hand it back
+            secondary.hospital_id = hid
         secondary.is_active = True
         secondary.merged_into_id = None
+        secondary.merge_log = None
         db.session.commit()
         return jsonify({"success": True, "restored_patient": secondary.to_dict()})
     except Exception as e:
         db.session.rollback()
         return fail("Failed to undo merge.", 500, e)
+
 
 if __name__ == "__main__":
     app.run(debug=DEBUG, port=int(os.getenv("PORT", 5000)))
