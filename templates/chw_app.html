@@ -112,13 +112,13 @@ if(p.startsWith('/api/encounter/'))return{status:'linked'};
 if(p.startsWith('/api/patients/')&&o.method==='PATCH'){const x=PTS.find(z=>z.id==p.split('/').pop());if((b.full_name||'').trim().length<2)throw new Error("Enter the patient's full name.");Object.assign(x,b);return x}
 if(p.startsWith('/api/patients/')){const x=PTS.find(z=>z.id==p.split('/').pop());return{...x,encounters:ENC[x.id]||[]}}
 if(p==='/api/triage'){const v={};for(const k in LIM)if(b[k]!=null)v[k]=b[k];if(!Object.keys(v).length)throw new Error('Enter at least one vital sign.');if(v.sys_bp&&v.dia_bp&&v.sys_bp<=v.dia_bp)throw new Error('Top BP must be higher than bottom BP.');const[t,tr]=rule(v);return{encounter_id:b.encounter_id||++ENCID,triage_data:{tier:t,trigger:tr.join(', '),notes:t==='RED'?'Immediate attention needed. Refer without delay.':t==='YELLOW'?'Needs prompt assessment. Recheck vitals in 15 to 30 minutes.':'No urgent concerns. Give routine care.'}}}
-if(p==='/api/diagnosis')return{options:['Malaria','Typhoid','Flu'],details:[{name:'Malaria',why:'Fever and body pain',meds:'Malaria tablets (ACT) for 3 days',adm:'Not needed unless vomiting or confused',sources:[{n:1,source:'National Standing Orders',page:142,snippet:'Suspect uncomplicated malaria... treat for uncomplicated malaria'}]}],reasoning:'Fever pattern matches malaria.',source_reference:'National Standing Orders for Community Health Extension Workers, p.142',grounded:true,encounter_id:++ENCID};
+if(p==='/api/diagnosis')return{options:['Malaria','Typhoid','Flu'],details:[{name:'Malaria',why:'Fever and body pain',meds:'Malaria tablets (ACT) for 3 days',adm:'Not needed unless vomiting or confused',sources:[{n:1,source:'National Standing Orders',page:142,snippet:'Suspect uncomplicated malaria... treat for uncomplicated malaria'}],grounded:true}],reasoning:'Fever pattern matches malaria.',source_reference:'National Standing Orders for Community Health Extension Workers, p.142',grounded:true,encounter_id:++ENCID};
 if(p==='/api/treatment_plan'){
   const dx=(b.diagnosis||'').toLowerCase();
   const cached=cget('plan:'+dx);
-  if(cached&&!NET.off) return cached;
+  if(cached && !NET.off) return cached;
   const plan={grounded:true,instructions:[{en:'Drink plenty of clean water.',ha:'Ka sha ruwa mai tsabta da yawa.',pcm:'Drink plenty clean water.',kind:'general'},{en:'Take the tablets 2 times a day for 3 days.',ha:'Ka sha magungunan sau biyu a rana tsawon kwana uku.',pcm:'Chop di medicine two times for day, three days.',kind:'medication'}],medications:'Artemether-lumefantrine as per weight band.',referral_advice:'Refer if vomiting persists or fever >39C after 3 days.',danger_signs:['Cannot drink','Fits','Extreme weakness'],sources:[{source:'National Standing Orders',page:142,snippet:'Suspect uncomplicated malaria... treat'}],warnings:[]};
-  cset('plan:'+dx,plan);
+  cset('plan:'+dx, plan);
   return plan;
 }
 if(p==='/api/referral'){if(!b.center_id)throw new Error('Choose a hospital.');if(!(b.reason||'').trim())throw new Error('Say why you are sending this patient.');if(!b.patient_id&&!(b.patient_name||'').trim())throw new Error('Choose or create a patient first.');
@@ -195,15 +195,24 @@ useEffect(()=>{api('/api/phrases').then(d=>{setPhr(d);cset('phr',d)}).catch(()=>
 useEffect(()=>{if(sc==='find')search('',true)},[sc]);
 useEffect(()=>{if(sc==='refer'||sc==='emerg')api('/api/centers').then(d=>{setFac(d);cset('fac',d)}).catch(()=>{})},[sc]);
 useEffect(()=>{
-  if(sc==='treat'&&dx&&!off){
-    setPlanLoad(true);
-    api('/api/treatment_plan',{json:{encounter_id:enc,patient_id:pt?pt.id:null,diagnosis:dx,symptoms:sym,vitals:vit,tier:tri?tri.tier:null}}).then(p=>{
-      setPlan(p);setPlanLoad(false);
-    }).catch(()=>{
-      setPlanLoad(false);
+  if(sc==='treat' && dx){
+    if(off){
       const cached=cget('plan:'+dx.toLowerCase());
-      if(cached){setPlan({...cached,warnings:[...(cached.warnings||[]),'Showing saved copy (offline)']});say('Showing saved treatment plan.')}
-    });
+      if(cached){
+        setPlan({...cached, warnings:[...(cached.warnings||[]), 'Showing saved copy (offline)']});
+        say('Showing saved treatment plan.');
+      }
+      setPlanLoad(false);
+    } else {
+      setPlanLoad(true);
+      api('/api/treatment_plan',{json:{encounter_id:enc,patient_id:pt?pt.id:null,diagnosis:dx,symptoms:sym,vitals:vit,tier:tri?tri.tier:null}}).then(p=>{
+        setPlan(p);setPlanLoad(false);
+      }).catch(()=>{
+        setPlanLoad(false);
+        const cached=cget('plan:'+dx.toLowerCase());
+        if(cached){setPlan({...cached,warnings:[...(cached.warnings||[]),'Showing saved copy (offline)']});say('Showing saved treatment plan.')}
+      });
+    }
   }
 },[sc,dx,off]);
 
@@ -230,7 +239,7 @@ const finish=async stage=>{if(!pt){say('Choose or add the patient first, so this
 if(tr&&tr.mode==='ambiguous')return say('Choose which reading is right first.');
 if(stage!=='treatment'&&!tr&&!sym.trim()&&!(vn&&!skipV)&&!dx.trim())return say('Nothing to save yet. Add what is wrong, a vital sign or a diagnosis.');
 const body={patient_id:pt.id,encounter_id:enc,stage,reason,...clinical()};
-if(stage==='treatment')body.treatment_given=Array.from(confirmed);
+if(stage==='treatment') body.treatment_given=Array.from(confirmed);
 if(off||(!navigator.onLine&&LIVE)){qAdd('/api/save_encounter',body);setQueued(qGet().length);setSaved(true);say('Saved on phone. It will be sent when signal returns.');return go('home')}
 const r=await run('Saving…',()=>api('/api/save_encounter',{json:body}));if(r){setSaved(true);say('Saved to '+pt.full_name+"'s record.");go('home')}};
 
